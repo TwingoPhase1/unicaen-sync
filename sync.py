@@ -8,108 +8,173 @@ import os
 import sys
 import re
 
-# --- CONFIGURATION (Via variables d'environnement) ---
+# --- CONFIGURATION ---
 ICS_URL = os.getenv("ICS_URL")
 USERNAME = os.getenv("ENT_USER")
 PASSWORD = os.getenv("ENT_PASS")
 CALENDAR_ID = os.getenv("CALENDAR_ID")
 SERVICE_ACCOUNT_FILE = 'credentials.json'
+ALARM_MINUTES = 60 
 
-# Petite sécurité
+# --- DICTIONNAIRE BUT R&T AVEC EMOJIS MATIÈRES ---
+# Clé = Code (sans point), Valeur = Emoji Matière + Nom
+COURS_MAPPING = {
+    # SEMESTRE 1
+    "R101": "🌐 Init. Réseaux",
+    "R102": "🔌 Archi. Réseaux",
+    "R103": "🏢 Réseaux Locaux",
+    "R104": "⚡ Syst. Élec.",
+    "R105": "📡 Supports Trans.",
+    "R106": "💾 Archi. Numérique",
+    "R107": "🐍 Prog. C++",     # Ou Python selon le langage
+    "R108": "🐧 Syst. Linux",
+    "R109": "🌍 Tech. Web",
+    "R110": "🇬🇧 Anglais",
+    "R111": "🗣️ Com. Pro.",
+    "R112": "🤝 PPP",
+    "R113": "📐 Maths Signal",
+    "R114": "📈 Maths Trans.",
+    "R115": "📅 Gestion Projet",
+    "SAE11": "🛡️ SAÉ Cyber",
+    "SAE12": "🕸️ SAÉ Réseaux",
+    "SAE13": "📡 SAÉ Trans.",
+    "SAE14": "🌐 SAÉ Web",
+    "SAE15": "📊 SAÉ Données",
+    "SAE16": "📂 Portfolio",
+
+    # SEMESTRE 2
+    "R201": "☁️ Tech. Internet",
+    "R202": "🛠️ Admin Sys & Virtu",
+    "R203": "📨 Services Réseaux",
+    "R204": "☎️ Téléphonie",
+    "R205": "🌊 Signaux Trans.",
+    "R206": "🔢 Numérisation",
+    "R207": "🗄️ Sources Données",
+    "R208": "📊 Traitement Données",
+    "R209": "🖼️ Dev Web",
+    "R210": "🇺🇸 Anglais",
+    "R211": "📢 Com. Pro.",
+    "R212": "🧭 PPP",
+    "R213": "➗ Maths Num.",
+    "R214": "📉 Analyse Signaux",
+    "SAE21": "🏢 SAÉ Réseau PME",
+    "SAE22": "📏 SAÉ Mesure",
+    "SAE23": "🏢 SAÉ Info Ent.",
+    "SAE24": "🚀 SAÉ Projet Intégratif",
+    "SAE25": "📂 Portfolio"
+}
+
 if not all([ICS_URL, USERNAME, PASSWORD, CALENDAR_ID]):
-    print("❌ Erreur : Variables d'environnement manquantes dans le fichier .env")
+    print("❌ Erreur : .env incomplet")
     sys.exit(1)
 
 # --- 1. TÉLÉCHARGEMENT ---
 print(f"📥 Connexion à l'ENT...")
-
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-}
+headers = {"User-Agent": "Mozilla/5.0"}
 
 try:
     response = requests.get(ICS_URL, headers=headers, auth=HTTPBasicAuth(USERNAME, PASSWORD))
     response.raise_for_status()
-    # Gestion encodage
     response.encoding = response.apparent_encoding if response.apparent_encoding else 'utf-8'
     print("✅ Fichier téléchargé !")
 except Exception as e:
-    print(f"❌ Erreur de téléchargement : {e}")
+    print(f"❌ Erreur DL : {e}")
     sys.exit(1)
 
-# --- 2. ANALYSE ET EMBELLISSEMENT ---
-print("⚙️ Analyse et ajout des émojis...")
+# --- 2. TRAITEMENT ---
+print("⚙️ Analyse et double-emojification...")
 try:
     c = Calendar(response.text)
 except Exception as e:
-    print(f"❌ Erreur lecture ICS : {e}")
+    print(f"❌ Erreur ICS : {e}")
     sys.exit(1)
 
 now_aware = datetime.datetime.now(datetime.timezone.utc)
-events_to_add = []
+temp_events = []
 
 for event in c.events:
     if not event.name or "hack ecampus" in event.name.lower():
         continue
     
-    # --- LOGIQUE D'EMBELLISSEMENT AVANCÉE ---
-    titre = event.name
-    
-    # 1. Nettoyage du préfixe administratif (GRP_...)
-    # On cherche le motif " - " pour couper ce qu'il y a avant
-    if " - " in titre:
-        parts = titre.split(" - ", 1)
-        if len(parts) > 1:
-            titre = parts[1].strip() 
-    
-    # 2. Attribution des Emojis contextuels (BUT R&T)
-    emoji = "📅" # Défaut
-    
-    titre_upper = titre.upper()
-    desc_upper = (event.description or "").upper()
-
-    # Logique de priorité : Examen > SAÉ > Types de cours > Matières
-    if "EXAM" in titre_upper or "DS" in titre_upper or "EVALUATION" in titre_upper:
-        emoji = "🚨" # Alerte pour examens
-    elif "SAE" in titre_upper or "SAÉ" in titre_upper or "PROJET" in titre_upper:
-        emoji = "🚀" # Fusée pour les SAÉ/Projets
-    elif "TP" in titre_upper or "TP" in desc_upper:
-        emoji = "💻" # Ordi pour les TP
-    elif "TD" in titre_upper or "TD" in desc_upper:
-        emoji = "✏️" # Crayon pour les TD
-    elif "CM" in titre_upper or "CM" in desc_upper or "AMPHI" in titre_upper:
-        emoji = "🎤" # Micro pour les Amphis
-    elif "ANGLAIS" in titre_upper:
-        emoji = "🇬🇧" # Drapeau
-    elif "COMMUNICATION" in titre_upper or "EXPRESSION" in titre_upper:
-        emoji = "🗣️" 
-    elif "SOUTIEN" in titre_upper:
-        emoji = "🆘" 
-    elif "REUNION" in titre_upper or "ACCUEIL" in titre_upper:
-        emoji = "ℹ️"
-
-    # Titre final : Emojie + Titre nettoyé
-    titre_final = f"{emoji} {titre}"
-
-    # --- FIN LOGIQUE ---
-
-    # Sécurisation date
     event_start = event.begin.datetime if hasattr(event.begin, 'datetime') else event.begin
-    
     if event_start > now_aware:
-        events_to_add.append({
-            'summary': titre_final,
+        
+        raw_title = event.name
+        
+        # 1. Nettoyage basique
+        if " - " in raw_title:
+            parts = raw_title.split(" - ", 1)
+            if len(parts) > 1:
+                raw_title = parts[1].strip()
+
+        # 2. Identification de la Matière (Emoji #2)
+        title_key = raw_title.upper().replace(" ", "").replace(".", "")
+        nom_matiere = raw_title # Par défaut
+        
+        # On cherche le code R&T
+        for code, nom_propre in COURS_MAPPING.items():
+            if code in title_key:
+                nom_matiere = nom_propre
+                break 
+
+        # 3. Identification du Type de cours (Emoji #1)
+        emoji_type = "📅"
+        full_info = (event.name + " " + (event.description or "")).upper()
+
+        if "EXAM" in full_info or "DS" in full_info or "EVALUATION" in full_info:
+            emoji_type = "🚨" # Priorité absolue
+        elif "TP" in full_info:
+            emoji_type = "💻"
+        elif "TD" in full_info:
+            emoji_type = "✏️"
+        elif "CM" in full_info or "AMPHI" in full_info:
+            emoji_type = "🎤"
+        elif "SOUTIEN" in full_info:
+            emoji_type = "🆘"
+        elif "SAE" in title_key: # Si c'est une SAE mais qu'on sait pas si c'est TP/TD
+            emoji_type = "🚀"
+
+        # Titre Final : [TYPE] [MATIERE]
+        # Ex: 🎤 🌐 Init. Réseaux
+        final_summary = f"{emoji_type} {nom_matiere}"
+
+        temp_events.append({
+            'original_start': event_start,
+            'summary': final_summary,
             'location': event.location,
             'description': event.description,
             'start': {'dateTime': event.begin.isoformat()}, 
             'end': {'dateTime': event.end.isoformat()},
+            'day_key': event_start.strftime('%Y-%m-%d')
         })
 
-print(f"✅ {len(events_to_add)} cours futurs traités.")
+# --- TRI ET ALARME ---
+temp_events.sort(key=lambda x: x['original_start'])
+events_to_add = []
+seen_days = set()
+
+for evt in temp_events:
+    day = evt['day_key']
+    reminders = {'useDefault': False, 'overrides': []}
+    
+    if day not in seen_days:
+        seen_days.add(day)
+        reminders['overrides'].append({'method': 'popup', 'minutes': ALARM_MINUTES})
+        evt['description'] = (evt['description'] or "") + "\n\n⏰ REVEIL 1H AVANT"
+    
+    events_to_add.append({
+        'summary': evt['summary'],
+        'location': evt['location'],
+        'description': evt['description'],
+        'start': evt['start'],
+        'end': evt['end'],
+        'reminders': reminders
+    })
+
+print(f"✅ {len(events_to_add)} cours traités.")
 
 # --- 3. GOOGLE SYNC ---
 if not os.path.exists(SERVICE_ACCOUNT_FILE):
-    print(f"❌ Erreur : {SERVICE_ACCOUNT_FILE} introuvable.")
     sys.exit(1)
 
 creds = service_account.Credentials.from_service_account_file(
@@ -118,34 +183,30 @@ creds = service_account.Credentials.from_service_account_file(
 service = build('calendar', 'v3', credentials=creds)
 now_str = now_aware.isoformat().replace("+00:00", "Z")
 
-# SUPPRESSION
-print("🧹 Nettoyage agenda...")
+# Batch Delete
 events_result = service.events().list(calendarId=CALENDAR_ID, timeMin=now_str, singleEvents=True, maxResults=2500).execute()
 items_to_delete = events_result.get('items', [])
-
 if items_to_delete:
     batch = service.new_batch_http_request()
-    count_del = 0
+    count = 0
     for e in items_to_delete:
         batch.add(service.events().delete(calendarId=CALENDAR_ID, eventId=e['id']))
-        count_del += 1
-        if count_del % 50 == 0:
+        count += 1
+        if count % 50 == 0:
             batch.execute()
             batch = service.new_batch_http_request()
-    if count_del % 50 != 0: batch.execute()
-    print(f"🗑️  {count_del} supprimés.")
+    if count % 50 != 0: batch.execute()
 
-# AJOUT
-print(f"🚀 Envoi des {len(events_to_add)} cours...")
+# Batch Insert
 if events_to_add:
     batch = service.new_batch_http_request()
-    count_add = 0
+    count = 0
     for body in events_to_add:
         batch.add(service.events().insert(calendarId=CALENDAR_ID, body=body))
-        count_add += 1
-        if count_add % 50 == 0:
+        count += 1
+        if count % 50 == 0:
             batch.execute()
             batch = service.new_batch_http_request()
-    if count_add % 50 != 0: batch.execute()
+    if count % 50 != 0: batch.execute()
 
 print("🎉 Terminé !")
