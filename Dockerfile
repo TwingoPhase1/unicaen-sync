@@ -4,6 +4,16 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
+# 1. On définit le fuseau horaire (Europe/Paris)
+ENV TZ=Europe/Paris
+
+# 2. On installe le paquet nécessaire pour gérer l'heure
+RUN apt-get update && \
+    apt-get install -y tzdata && \
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    echo $TZ > /etc/timezone && \
+    apt-get clean
+
 WORKDIR /app
 
 # Installation des libs
