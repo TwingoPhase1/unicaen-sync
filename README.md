@@ -1,101 +1,96 @@
-# 📅 Unicaen EDT Sync -\> Google Calendar
+# 📅 Unicaen EDT Sync -> Google Calendar
 
-Ce projet est un outil d'automatisation (conçu pour tourner sur un Homelab/VPS) qui synchronise l'emploi du temps de l'Université de Caen (Zimbra/ADE) vers un Google Agenda dédié.
+![Python](https://img.shields.io/badge/Python-3.11-blue?style=for-the-badge&logo=python&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![Status](https://img.shields.io/badge/Status-Maintained-green?style=for-the-badge)
+
+**Unicaen EDT Sync** est un outil d'automatisation puissant conçu pour synchroniser votre emploi du temps universitaire (Zimbra/ADE) vers un Google Agenda dédié. Il transforme un calendrier brut et illisible en un agenda clair, propre et notifié.
+
+---
 
 ## ✨ Fonctionnalités
 
-  * **Contournement de l'authentification :** Utilise `HTTPBasicAuth` pour télécharger le fichier `.ics` directement depuis l'ENT (plus besoin de liens publics qui expirent).
-  * **Nettoyage des titres :** Transforme les titres illisibles (`GRP_RTRTA...`) en titres propres avec des émojis (🎓 CM, 📝 TD, 💻 TP, ⚠️ Examen).
-  * **Synchronisation unidirectionnelle :** Met à jour Google Agenda toutes les X heures (via Cron) en supprimant les doublons.
-  * **Dockerisé :** Prêt à être déployé n'importe où.
+| Fonctionnalité | Description |
+| :--- | :--- |
+| 🔓 **Auth Bypass** | Utilise `HTTPBasicAuth` pour s'authentifier directement sur `ent.unicaen.fr`, rendant obsolètes les liens ICS publics qui expirent tous les ans. |
+| 🏷️ **Smart Renaming** | **Exemple :** `COURS - R107 - GRP A` devient `🐍 Prog. Fondamentaux`. <br> Supporte les codes **R1xx** (S1), **R2xx** (S2) et **SAExx**. Ajoute des émojis contextuels (🇬🇧 Anglais, 🎤 CM, 💻 TP). |
+| ⏰ **Smart Alarms** | Si activé, configure une notification *pop-up* **60 minutes** avant le début du **premier cours** de la journée uniquement. Idéal pour être réveillé sans spam. |
+| ⚡ **Differential Sync** | Calcule le hash MD5 unique de chaque événement. Ne consomme du quota API Google que si l'événement a réellement changé (titre, salle, heure). |
+| 🛠️ **Hack Filter** | Si `SHOW_HACK_CAMPUS=false`, supprime automatiquement les événements contenant "Hack Ecampus" pour garder l'agenda propre. |
+| 🐳 **Docker Ready** | Image alpine ultra-légère (~50Mo). Timezone configurée sur `Europe/Paris` pour éviter les décalages horaires. |
 
------
+---
 
-## 🚀 Installation & Configuration (La partie importante)
+## 🚀 Installation & Configuration
 
-Ce code ne fonctionne pas "tout seul", il a besoin de vos identifiants et d'un accès à l'API Google.
+### 1. Prérequis
 
-### 1\. Création du "Robot" Google (Service Account)
+#### ☁️ Google Cloud Platform (GCP)
+1.  Rendez-vous sur la [Google Cloud Console](https://console.cloud.google.com/).
+2.  Créez un nouveau projet (ex: `Unicaen-Sync`).
+3.  Allez dans **"API et services"** > **"Bibliothèque"**, cherchez **"Google Calendar API"** et cliquez sur **ACTIVER**.
+4.  Dans **"IAM et administration"** > **"Comptes de service"**, créez un compte (ex: `bot-agenda`).
+5.  Cliquez sur l'email du compte créé, onglet **"CLÉS"** > **Ajouter une clé** > **JSON**.
+6.  Renommez le fichier téléchargé en `credentials.json` et placez-le dans le dossier du projet.
 
-C'est l'étape la plus complexe, suivez bien les instructions :
+#### 📅 Configuration Agenda
+1.  Créez un **nouvel agenda** (ne polluez pas votre agenda perso !).
+2.  Dans **Paramètres et partage** > **Partager avec des personnes spécifiques**, ajoutez l'email du compte de service (celui en `@...iam.gserviceaccount.com`).
+3.  ⚠️ **Important :** Sélectionnez l'autorisation **"Apporter des modifications aux événements"**.
+4.  Récupérez l'**ID de l'agenda** en bas de la page (section "Intégrer l'agenda").
 
-1.  Allez sur la **[Google Cloud Console](https://console.cloud.google.com/)**.
-2.  Créez un **Nouveau Projet** (ex: `Unicaen-Sync`).
-3.  Allez dans **"API et services" \> "Bibliothèque"**, cherchez **"Google Calendar API"** et cliquez sur **ACTIVER**.
-4.  Allez dans **"IAM et administration" \> "Comptes de service"**.
-5.  Cliquez sur **"Créer un compte de service"**, donnez-lui un nom (ex: `bot-agenda`).
-6.  Une fois créé, cliquez sur l'adresse email du robot (`bot-agenda@...iam.gserviceaccount.com`).
-7.  Allez dans l'onglet **"CLÉS"** \> **Ajouter une clé** \> **Créer une nouvelle clé** \> **JSON**.
-8.  Un fichier va se télécharger. **Renommez-le `credentials.json`** et placez-le à la racine du projet.
+#### 💻 Système
+*   **Docker** installé sur la machine.
 
-### 2\. Configuration de Google Agenda
-
-Votre robot a besoin de la permission de modifier votre agenda.
-
-1.  Créez un **nouvel agenda** (secondaire) sur Google Agenda (ne mélangez pas avec votre perso \!).
-2.  Dans les **Paramètres et partage** de cet agenda, allez dans "Partager avec des personnes spécifiques".
-3.  Ajoutez l'**adresse email du robot** (celle trouvée à l'étape 1).
-4.  ⚠️ **Important :** Donnez-lui l'autorisation **"Apporter des modifications aux événements"**.
-5.  Toujours dans les paramètres, descendez jusqu'à "Intégrer l'agenda" et copiez l'**ID de l'agenda** (ex: `c_xxxxxxxx@group.calendar.google.com`).
-
-### 3\. Le fichier `.env`
-
-Créez un fichier nommé `.env` à la racine du projet et remplissez-le avec vos informations :
+### 2. Configuration (`.env`)
+Créez un fichier `.env` à la racine :
 
 ```ini
-# Le lien direct vers le fichier .ics de l'ENT (celui qui demande un mot de passe)
-# Format habituel : https://ent.unicaen.fr/zimbra/user/votre.nom@unicaen.fr/Calendar.ics
-ICS_URL=https://ent.unicaen.fr/zimbra/...../Calendar.ics
+# 🔗 URL de l'ICS (Zimbra)
+ICS_URL=https://ent.unicaen.fr/zimbra/user/votre.nom@unicaen.fr/Calendar.ics
 
-# Vos identifiants ENT (Numéro étudiant & Mot de passe)
+# 👤 Identifiants ENT (Pour le téléchargement auth)
 ENT_USER=22xxxxx
-ENT_PASS=votre_mot_de_passe_secret
+ENT_PASS=votre_mot_de_passe
 
-# L'ID de l'agenda Google récupéré à l'étape 2
+# 📅 ID de l'agenda cible (créez un agenda dédié !)
 CALENDAR_ID=xxxxxxxx@group.calendar.google.com
+
+# ⚙️ Options Avancées
+# Chemin vers la clé Google (par défaut: credentials.json)
+GOOGLE_PKEY_PATH=credentials.json
+# Afficher ou masquer les événements "Hack Ecampus" (true/false)
+SHOW_HACK_CAMPUS=false
 ```
 
-> **⚠️ ATTENTION :** Ne committez JAMAIS le fichier `.env` ou `credentials.json` sur GitHub \! Ajoutez-les à votre `.gitignore`.
+### 3. Usage avec Docker
 
------
-
-## 🐳 Utilisation avec Docker
-
-Une fois les fichiers `credentials.json` et `.env` présents :
-
-### 1\. Construire l'image
-
+#### Build
 ```bash
 docker build -t unicaen-sync .
 ```
 
-### 2\. Lancer manuellement (pour tester)
-
+#### Run (Test manuel)
+Assurez-vous que `credentials.json` est présent dans le dossier.
 ```bash
-docker run --rm --env-file .env unicaen-sync
+docker run --rm --env-file .env -v $(pwd)/credentials.json:/app/credentials.json unicaen-sync
 ```
 
-### 3\. Automatisation (Cron)
-
-Pour lancer la synchro tous les jours à midi et minuit, ajoutez ceci à votre crontab (`crontab -e`) :
-
+#### Automatisation (Crontab)
+Pour lancer la synchronisation tous les jours à 6h00 et 18h00 :
 ```bash
-0 0,12 * * * docker run --rm --env-file /chemin/absolu/vers/.env unicaen-sync >> /var/log/unicaen.log 2>&1
+0 6,18 * * * docker run --rm --env-file /abs/path/.env -v /abs/path/credentials.json:/app/credentials.json unicaen-sync >> /var/log/unicaen.log 2>&1
 ```
 
------
+---
 
-## 🛠️ Structure du projet
+## 🛠️ Structure du Projet
 
-  * `sync.py` : Le script principal Python.
-  * `requirements.txt` : Les dépendances Python.
-  * `Dockerfile` : La configuration pour construire le conteneur.
-  * `.env` : Vos secrets (NON INCLUS).
-  * `credentials.json` : La clé Google (NON INCLUSE).
+*   `sync.py` : Script principal contenant toute la logique de parsing et de synchro.
+*   `Dockerfile` : Configuration de l'image Docker (Timezone Paris configurée).
+*   `requirements.txt` : Dépendances (`google-api-python-client`, `ics`, `requests`).
+*   `credentials.json` : Clé secrète Google.
 
------
-
+---
 ### ⚡ Credits
-
-  * **Author:** [Ton Pseudo GitHub]
   * **Vibe coding assisted by Gemini 3 Pro** 🤖✨
