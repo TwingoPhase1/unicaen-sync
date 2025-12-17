@@ -8,10 +8,13 @@ import os
 import sys
 import hashlib
 import re
+import json
+import pytz
 
-# --- FONCTION DE LOG ---
+# --- CONFIGURATION LOGS ---
 def log(msg):
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    paris_tz = pytz.timezone('Europe/Paris')
+    now = datetime.datetime.now(paris_tz).strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] {msg}")
     sys.stdout.flush()
 
@@ -21,47 +24,36 @@ USERNAME = os.getenv("ENT_USER")
 PASSWORD = os.getenv("ENT_PASS")
 CALENDAR_ID = os.getenv("CALENDAR_ID")
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_PKEY_PATH", 'credentials.json')
-ALARM_MINUTES = 60 
+MAPPING_FILE = 'mapping.json'
+MISSING_LOG_FILE = 'missing_subjects.txt'
 
 # Gestion Hack Ecampus
 show_hack_env = os.getenv("SHOW_HACK_CAMPUS", "true").lower()
 SHOW_HACK_CAMPUS = show_hack_env in ["true", "1", "yes", "on"]
 
+# --- VÉRIFICATIONS ---
 if not all([ICS_URL, USERNAME, PASSWORD, CALENDAR_ID]):
-    log("❌ CRITIQUE : .env incomplet")
+    log("❌ CRITIQUE : Variables d'environnement manquantes (.env)")
     sys.exit(1)
 
-# --- 1. DICTIONNAIRE ---
+if not os.path.exists(MAPPING_FILE):
+    log(f"❌ CRITIQUE : Fichier '{MAPPING_FILE}' introuvable.")
+    sys.exit(1)
+
+# --- CHARGEMENT DICTIONNAIRE ---
+try:
+    with open(MAPPING_FILE, 'r', encoding='utf-8') as f:
+        COURS_MAPPING = json.load(f)
+    log(f"✅ Dictionnaire chargé : {len(COURS_MAPPING)} matières.")
+except json.JSONDecodeError as e:
+    log(f"❌ CRITIQUE : Erreur de syntaxe JSON dans {MAPPING_FILE} : {e}")
+    sys.exit(1)
+
 SPECIAL_KEYWORDS = [
     "HACK", "SORTIE", "VISITE", "CONFÉRENCE", "ATELIER", 
     "FORUM", "RENCONTRE", "JPO", "SALON", "DÉFI", "CHALLENGE",
     "RÉUNION DE RENTRÉE", "PETIT DÉJEUNER", "SHOOTING", "OUVERTURE"
 ]
-
-COURS_MAPPING = {
-    # SEMESTRE 1
-    "R101": "🌐 Init. Réseaux", "R102": "🔌 Archi. Réseaux", "R103": "🏢 Réseaux Locaux",
-    "R104": "⚡ Syst. Élec.", "R105": "📡 Supports Trans.", "R106": "💾 Archi. Numérique",
-    "R107": "🐍 Prog. Fondamentaux", "R108": "🐧 Syst. Exploitation", "R109": "🌍 Tech. Web",
-    "R110": "🇬🇧 Anglais Tech.", "R111": "🗣️ Com. Pro.", "R112": "🤝 PPP",
-    "R113": "📐 Maths Signal", "R114": "📈 Maths Trans.", "R115": "📅 Gestion Projet",
-    # SAE S1
-    "SAE101": "🛡️ SAÉ Cyber", "SAE102": "🕸️ SAÉ Réseaux", "SAE103": "📡 SAÉ Trans.",
-    "SAE104": "🌐 SAÉ Web", "SAE105": "📊 SAÉ Données", "SAE106": "📂 Portfolio",
-    "SAE11": "🛡️ SAÉ Cyber", "SAE12": "🕸️ SAÉ Réseaux", "SAE13": "📡 SAÉ Trans.",
-    "SAE14": "🌐 SAÉ Web", "SAE15": "📊 SAÉ Données", "SAE16": "📂 Portfolio",
-    # SEMESTRE 2
-    "R201": "☁️ Tech. Internet", "R202": "🛠️ Admin Sys", "R203": "📨 Services Réseaux",
-    "R204": "☎️ Téléphonie", "R205": "🌊 Signaux Trans.", "R206": "🔢 Numérisation",
-    "R207": "🗄️ Sources Données", "R208": "📊 Traitement Données", "R209": "🖼️ Dev Web",
-    "R210": "🇺🇸 Anglais Tech.", "R211": "📢 Com. Pro.", "R212": "🧭 PPP",
-    "R213": "➗ Maths Num.", "R214": "📉 Analyse Signaux",
-    # SAE S2
-    "SAE201": "🏢 SAÉ Réseau PME", "SAE202": "📏 SAÉ Mesure", "SAE203": "🏢 SAÉ Info Ent.",
-    "SAE204": "🚀 SAÉ Projet", "SAE205": "📂 Portfolio",
-    "SAE21": "🏢 SAÉ Réseau PME", "SAE22": "📏 SAÉ Mesure", "SAE23": "🏢 SAÉ Info Ent.",
-    "SAE24": "🚀 SAÉ Projet", "SAE25": "📂 Portfolio"
-}
 
 # --- HELPER BATCH ---
 def execute_batch(service, requests_list):
@@ -93,36 +85,43 @@ except Exception as e:
     sys.exit(1)
 
 # --- 3. TRAITEMENT INTELLIGENT ---
-log("⚙️ Analyse et calcul des IDs (Format V15)...")
+log("⚙️ Analyse V1.0 Stable...")
 try:
     c = Calendar(response.text)
 except Exception as e:
     log(f"❌ ERREUR LECTURE ICS : {e}")
     sys.exit(1)
 
-now_aware = datetime.datetime.now(datetime.timezone.utc)
+paris_tz = pytz.timezone('Europe/Paris')
+utc_tz = datetime.timezone.utc
+now_aware = datetime.datetime.now(utc_tz)
+
 events_payload_map = {} 
 seen_days = set()
+missing_codes = set()
 
 sorted_events = sorted(c.events, key=lambda x: x.begin)
 
 for event in sorted_events:
     if not event.name: continue
     
-    # Filtre Hack
     if not SHOW_HACK_CAMPUS and "hack ecampus" in event.name.lower():
         continue 
     
-    event_start = event.begin.datetime if hasattr(event.begin, 'datetime') else event.begin
-    event_end = event.end.datetime if hasattr(event.end, 'datetime') else event.end
+    try:
+        event_start = event.begin.to('utc').datetime
+        event_end = event.end.to('utc').datetime
+    except Exception as e:
+        log(f"⚠️ Erreur de date sur un événement : {e}")
+        continue
 
-    if event_start > now_aware:
+    # On garde si la FIN est dans le futur
+    if event_end > now_aware:
         
-        # --- LOGIQUE DE NOMMAGE ---
         original_title = event.name.strip()
         final_summary = original_title
-        
         title_upper = original_title.upper()
+        
         is_special = any(keyword in title_upper for keyword in SPECIAL_KEYWORDS)
         
         if is_special:
@@ -135,59 +134,78 @@ for event in sorted_events:
             search_zone = (event.name + " " + (event.description or "")).upper()
             search_zone_clean = search_zone.replace(".", "").replace(" ", "").replace("-", "").replace("É", "E")
             
-            nom_matiere = None
+            subj_emoji = ""
+            subj_name = ""
+            found_code = False
+            
             for code, nom_propre in COURS_MAPPING.items():
                 if code in search_zone_clean:
-                    nom_matiere = nom_propre
+                    parts = nom_propre.split(" ", 1)
+                    if len(parts) == 2:
+                        subj_emoji, subj_name = parts[0], parts[1]
+                    else:
+                        subj_name = nom_propre
+                    found_code = True
                     break
             
-            if not nom_matiere:
-                nom_matiere = original_title
-                if " - " in nom_matiere:
-                    parts = nom_matiere.split(" - ", 1)
-                    if len(parts) > 1 and len(parts[1]) > 2:
-                        nom_matiere = parts[1].strip()
+            if not found_code:
+                potential_code = re.search(r'\b(R\d{3}|SAE\d{2,3})\b', search_zone_clean)
+                if potential_code:
+                    missing_codes.add(potential_code.group(0))
 
-            # Emoji Type & Préfixe Texte
+            if not subj_name:
+                subj_name = original_title
+                if " - " in subj_name:
+                    parts = subj_name.split(" - ", 1)
+                    if len(parts) > 1 and len(parts[1]) > 2:
+                        subj_name = parts[1].strip()
+
             emoji_type = "📅"
-            prefix = ""
-            
+            type_label = "" 
             desc_upper = (event.description or "").upper()
             
             if "EXAM" in search_zone or "EVALUATION" in search_zone or "PARTIEL" in search_zone or re.search(r'\bDS\b', search_zone): 
                 emoji_type = "🚨"
-                prefix = "Examen "
+                type_label = "Examen"
             elif "TP" in title_upper: 
                 emoji_type = "💻"
+                type_label = "TP"
             elif "TD" in title_upper: 
                 emoji_type = "✏️"
+                type_label = "TD"
             elif "CM" in title_upper or "AMPHI" in title_upper: 
                 emoji_type = "🎤"
+                type_label = "CM"
             elif "SOUTIEN" in title_upper: 
                 emoji_type = "🆘"
+                type_label = "Soutien"
             elif "ANGLAIS" in title_upper: 
                 emoji_type = "🇬🇧"
+                type_label = "Anglais"
             elif not any(x in title_upper for x in ["TP", "TD", "CM"]):
-                if "TP" in desc_upper: emoji_type = "💻"
-                elif "TD" in desc_upper: emoji_type = "✏️"
-                elif "CM" in desc_upper: emoji_type = "🎤"
+                if "TP" in desc_upper: emoji_type = "💻"; type_label = "TP"
+                elif "TD" in desc_upper: emoji_type = "✏️"; type_label = "TD"
+                elif "CM" in desc_upper: emoji_type = "🎤"; type_label = "CM"
 
-            final_summary = f"{emoji_type} {prefix}{nom_matiere}"
+            if type_label == "Examen":
+                final_summary = f"{emoji_type} {type_label} {subj_emoji} {subj_name}"
+            else:
+                final_summary = f"{emoji_type}{subj_emoji} {type_label} {subj_name}"
+            
+            final_summary = re.sub(r'\s+', ' ', final_summary).strip()
 
-        # --- ID STABLE (V15 - "cal") ---
-        # FIX: Pas d'underscore allowed par Google (0-9, a-v)
+        # --- ID STABLE ---
         id_str = f"cal_{final_summary}{event_start.isoformat()}"
         unique_id = "cal" + hashlib.md5(id_str.encode('utf-8')).hexdigest()
 
-        # --- ALARME 1ER COURS ---
+        # --- ALARME & DESCRIPTION ---
         day_key = event_start.strftime('%Y-%m-%d')
         reminders = {'useDefault': False, 'overrides': []}
         desc = (event.description or "").strip()
 
         if day_key not in seen_days:
             seen_days.add(day_key)
-            reminders['overrides'].append({'method': 'popup', 'minutes': ALARM_MINUTES})
-            desc = f"⏰ REVEIL ACTIVÉ\n\n{desc}"
+            desc = f"🔔 Premier cours de la journée\n\n{desc}"
 
         event_body = {
             'id': unique_id,
@@ -196,12 +214,28 @@ for event in sorted_events:
             'description': desc,
             'start': {'dateTime': event_start.isoformat()}, 
             'end': {'dateTime': event_end.isoformat()},
-            'reminders': reminders
+            'reminders': reminders,
+            'extendedProperties': {
+                'private': {
+                    'createdBy': 'unicaen-sync-bot',
+                    'version': '1.0'
+                }
+            }
         }
-        
         events_payload_map[unique_id] = event_body
 
-# --- 4. GOOGLE SYNC (DIFFÉRENTIEL) ---
+if missing_codes:
+    log(f"⚠️ Codes matières inconnus détectés : {', '.join(missing_codes)}")
+    try:
+        with open(MISSING_LOG_FILE, 'w') as f:
+            f.write(f"Dernière détection : {datetime.datetime.now()}\n")
+            for code in missing_codes:
+                f.write(f"{code}\n")
+        log(f"📝 Liste enregistrée dans {MISSING_LOG_FILE}")
+    except Exception as e:
+        log(f"❌ Impossible d'écrire le log : {e}")
+
+# --- 4. GOOGLE SYNC ---
 if not os.path.exists(SERVICE_ACCOUNT_FILE):
     log(f"❌ ERREUR : {SERVICE_ACCOUNT_FILE} introuvable.")
     sys.exit(1)
@@ -238,40 +272,31 @@ except Exception as e:
     log(f"❌ ERREUR API GOOGLE : {e}")
     sys.exit(1)
 
-# Calcul des différences
+# Différentiel
 ics_ids = set(events_payload_map.keys())
 google_ids = set(google_events_map.keys())
 
 def should_delete(ev_id):
-    # Regex mise à jour pour inclure les IDs "cal" (V15) et "raw md5" (V13)
-    if re.match(r'^(cal)?[a-f0-9]{32}$', ev_id):
-        return True
-    
+    # 1. Signature V1.0+ (Métadonnées) - La preuve absolue
     event = google_events_map.get(ev_id)
     if not event: return False
     
-    desc = event.get('description', '') or ''
-    summary = event.get('summary', '') or ''
-    
-    if "REVEIL" in desc or "PREMIER COURS" in desc:
+    props = event.get('extendedProperties', {}).get('private', {})
+    if props.get('createdBy') == 'unicaen-sync-bot':
         return True
+
+    # 2. Signature Beta/Legacy (ID Pattern)
+    # On supprime tout ce qui ressemble à un ID généré par nos versions précédentes
+    if re.match(r'^(cal)?[a-f0-9]{32}$', ev_id): return True
     
-    bot_emojis = ["🎤", "✏️", "💻", "📅", "🚨", "🚀", "🇬🇧", "🆘", "✨", "🛠️", "🚌"]
-    if any(emoji in summary for emoji in bot_emojis):
-        return True
-        
     return False
 
 ids_to_maybe_delete = google_ids - ics_ids
 to_delete = {x for x in ids_to_maybe_delete if should_delete(x)}
-
-ids_potential_update = google_ids & ics_ids
 to_insert = ics_ids - google_ids
-
 to_update = set()
-skipped_updates = 0
 
-for eid in ids_potential_update:
+for eid in (google_ids & ics_ids):
     new_data = events_payload_map[eid]
     old_data = google_events_map[eid]
     
@@ -280,25 +305,19 @@ for eid in ids_potential_update:
     elif new_data['description'] != old_data.get('description', ''): needs_update = True
     elif new_data['location'] != old_data.get('location', ''): needs_update = True
     
-    old_reminders = old_data.get('reminders', {})
-    new_reminders = new_data['reminders']
-    if old_reminders.get('useDefault') != new_reminders['useDefault']: needs_update = True
+    old_props = old_data.get('extendedProperties', {}).get('private', {})
+    if 'createdBy' not in old_props: needs_update = True
 
     if needs_update: to_update.add(eid)
-    else: skipped_updates += 1
 
 log(f"📊 Analyse : +{len(to_insert)} ajouts, -{len(to_delete)} suppressions, ~{len(to_update)} mises à jour.")
 
-# --- 5. EXÉCUTION ---
 batch_requests = []
-
 for ev_id in to_delete:
     batch_requests.append(service.events().delete(calendarId=CALENDAR_ID, eventId=ev_id))
-
 for ev_id in to_insert:
     body = events_payload_map[ev_id]
     batch_requests.append(service.events().insert(calendarId=CALENDAR_ID, body=body))
-
 for ev_id in to_update:
     body = events_payload_map[ev_id]
     batch_requests.append(service.events().update(calendarId=CALENDAR_ID, eventId=ev_id, body=body))
