@@ -11,6 +11,7 @@ import hashlib
 import re
 import json
 import logging
+import argparse
 from zoneinfo import ZoneInfo
 
 # --- Optionnel : charger .env en local ---
@@ -285,9 +286,9 @@ def generate_stable_id(event_uid):
     return "cal" + raw_hash
 
 
-def parse_events(ics_text, cours_mapping):
+def parse_events(ics_text, cours_mapping, full_sync=False):
     """Parse le fichier ICS et retourne les événements transformés."""
-    logger.info("⚙️ Analyse V2.1...")
+    logger.info("⚙️ Analyse V3.0...")
     try:
         cal = Calendar(ics_text)
     except Exception as e:
@@ -319,8 +320,8 @@ def parse_events(ics_text, cours_mapping):
             logger.warning(f"⚠️ Erreur de date sur un événement : {e}")
             continue
 
-        # On garde si la FIN est dans le futur
-        if event_end <= now_aware:
+        # On garde si la FIN est dans le futur (sauf en mode --full)
+        if not full_sync and event_end <= now_aware:
             continue
 
         # Classification
@@ -357,7 +358,7 @@ def parse_events(ics_text, cours_mapping):
             'extendedProperties': {
                 'private': {
                     'createdBy': 'unicaen-sync-bot',
-                    'version': '2.1'
+                    'version': '3.0'
                 }
             }
         }
@@ -409,7 +410,7 @@ def should_delete(ev_id, google_events_map):
     if not event:
         return False
 
-    # Signature V1.0+ / V2.x (Métadonnées)
+    # Signature V1.0+ / V2.x / V3.x (Métadonnées)
     props = event.get('extendedProperties', {}).get('private', {})
     if props.get('createdBy') == 'unicaen-sync-bot':
         return True
@@ -421,7 +422,7 @@ def should_delete(ev_id, google_events_map):
     return False
 
 
-def sync_to_google(events_payload_map):
+def sync_to_google(events_payload_map, full_sync=False):
     """Synchronise les événements transformés avec Google Calendar."""
     creds = service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE, scopes=['https://www.googleapis.com/auth/calendar']
@@ -433,17 +434,20 @@ def sync_to_google(events_payload_map):
     # Récupérer les événements Google existants
     google_events_map = {}
     page_token = None
-    now_str = datetime.datetime.now(UTC_TZ).isoformat().replace("+00:00", "Z")
+    list_params = {
+        'calendarId': CALENDAR_ID,
+        'singleEvents': True,
+        'maxResults': 2500,
+    }
+    if not full_sync:
+        now_str = datetime.datetime.now(UTC_TZ).isoformat().replace("+00:00", "Z")
+        list_params['timeMin'] = now_str
 
     try:
         while True:
-            events_result = service.events().list(
-                calendarId=CALENDAR_ID,
-                timeMin=now_str,
-                singleEvents=True,
-                maxResults=2500,
-                pageToken=page_token
-            ).execute()
+            if page_token:
+                list_params['pageToken'] = page_token
+            events_result = service.events().list(**list_params).execute()
 
             for item in events_result.get('items', []):
                 if 'id' in item:
@@ -484,9 +488,9 @@ def sync_to_google(events_payload_map):
         elif new_data['end'].get('dateTime') != old_data.get('end', {}).get('dateTime', ''):
             needs_update = True
 
-        # S'assurer que les métadonnées V2.1 sont présentes
+        # S'assurer que les métadonnées V3.0 sont présentes
         old_props = old_data.get('extendedProperties', {}).get('private', {})
-        if old_props.get('version') != '2.1':
+        if old_props.get('version') != '3.0':
             needs_update = True
 
         if needs_update:
@@ -517,12 +521,20 @@ def sync_to_google(events_payload_map):
 # =============================================================================
 
 def main():
+    parser = argparse.ArgumentParser(description='Unicaen EDT → Google Calendar Sync')
+    parser.add_argument('--full', action='store_true',
+                        help='Synchronise TOUS les événements (passés + futurs)')
+    args = parser.parse_args()
+
+    if args.full:
+        logger.info("🔁 Mode FULL : synchronisation de tous les événements (passés inclus)")
+
     validate_config()
     cours_mapping = load_mapping()
     ics_text = download_ics()
-    events_payload_map, missing_codes = parse_events(ics_text, cours_mapping)
+    events_payload_map, missing_codes = parse_events(ics_text, cours_mapping, full_sync=args.full)
     log_missing_codes(missing_codes)
-    sync_to_google(events_payload_map)
+    sync_to_google(events_payload_map, full_sync=args.full)
     logger.info("🎉 Synchronisation terminée.")
 
 
