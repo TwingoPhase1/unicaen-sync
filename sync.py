@@ -141,23 +141,33 @@ def enrich_description(raw_desc, cours_data, matched_code, is_first_of_day):
     """
     desc = (raw_desc or "").strip()
     
-    # Extraire les infos depuis la description brute
-    enseignants = ""
-    groupe = ""
+    # Extraire les infos depuis la description brute (sets pour dédoublonner)
+    enseignants_list = []
+    groupes_list = []
     
-    for line in desc.split("\\n"):
+    # Split sur vrais retours à la ligne ET sur \n littéraux
+    lines = re.split(r'\n|\\n', desc)
+    
+    for line in lines:
         line = line.strip()
         if not line:
             continue
         
         line_lower = line.lower()
-        if line_lower.startswith("enseignant :") or line_lower.startswith("enseignant:"):
-            enseignants = line.split(":", 1)[1].strip()
-        elif line_lower.startswith("enseignants :") or line_lower.startswith("enseignants:"):
-            enseignants = line.split(":", 1)[1].strip()
+        
+        # Lignes à IGNORER
+        if line_lower.startswith("salle") or "groupe par activité" in line_lower or "groupes par activité" in line_lower:
+            continue
+        
+        # Lignes à EXTRAIRE
+        if line_lower.startswith("enseignant"):
+            val = line.split(":", 1)[1].strip() if ":" in line else line
+            if val and val not in enseignants_list:
+                enseignants_list.append(val)
         elif "groupe d'étudiants" in line_lower or "groupes d'étudiants" in line_lower:
-            groupe = line.split(":", 1)[1].strip() if ":" in line else line
-        # On ignore : salle (déjà dans location) et groupe par activité
+            val = line.split(":", 1)[1].strip() if ":" in line else line
+            if val and val not in groupes_list:
+                groupes_list.append(val)
     
     # Construction de la description enrichie
     parts = []
@@ -168,10 +178,14 @@ def enrich_description(raw_desc, cours_data, matched_code, is_first_of_day):
     
     if matched_code and cours_data:
         parts.append(f"📚 Ressource : {matched_code} — {cours_data.get('name', '')}")
-    if enseignants:
-        parts.append(f"👨‍🏫 Enseignant : {enseignants}")
-    if groupe:
-        parts.append(f"👥 Groupe : {groupe}")
+    
+    if enseignants_list:
+        label = "Enseignants" if len(enseignants_list) > 1 else "Enseignant"
+        parts.append(f"👨‍🏫 {label} : {', '.join(enseignants_list)}")
+    
+    if groupes_list:
+        label = "Groupes" if len(groupes_list) > 1 else "Groupe"
+        parts.append(f"👥 {label} : {', '.join(groupes_list)}")
     
     # Ajouter les coefficients si on a trouvé la matière
     if cours_data:
