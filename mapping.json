@@ -1,53 +1,448 @@
 {
-  "R101": "🌐 Init. Réseaux",
-  "R102": "🔌 Archi. Réseaux",
-  "R103": "🏢 Réseaux Locaux",
-  "R104": "⚡ Syst. Élec.",
-  "R105": "📡 Supports Trans.",
-  "R106": "💾 Archi. Numérique",
-  "R107": "🐍 Prog. Fondamentaux",
-  "R108": "🐧 Syst. Exploitation",
-  "R109": "🌍 Tech. Web",
-  "R110": "🇬🇧 Anglais Tech.",
-  "R111": "🗣️ Com. Pro.",
-  "R112": "🤝 PPP",
-  "R113": "📐 Maths Signal",
-  "R114": "📈 Maths Trans.",
-  "R115": "📅 Gestion Projet",
-  "SAE101": "🛡️ SAÉ Cyber",
-  "SAE102": "🕸️ SAÉ Réseaux",
-  "SAE103": "📡 SAÉ Trans.",
-  "SAE104": "🌐 SAÉ Web",
-  "SAE105": "📊 SAÉ Données",
-  "SAE106": "📂 Portfolio",
-  "SAE11": "🛡️ SAÉ Cyber",
-  "SAE12": "🕸️ SAÉ Réseaux",
-  "SAE13": "📡 SAÉ Trans.",
-  "SAE14": "🌐 SAÉ Web",
-  "SAE15": "📊 SAÉ Données",
-  "SAE16": "📂 Portfolio",
-  "R201": "☁️ Tech. Internet",
-  "R202": "🛠️ Admin Sys",
-  "R203": "📨 Services Réseaux",
-  "R204": "☎️ Téléphonie",
-  "R205": "🌊 Signaux Trans.",
-  "R206": "🔢 Numérisation",
-  "R207": "🗄️ Sources Données",
-  "R208": "📊 Traitement Données",
-  "R209": "🖼️ Dev Web",
-  "R210": "🇺🇸 Anglais Tech.",
-  "R211": "📢 Com. Pro.",
-  "R212": "🧭 PPP",
-  "R213": "➗ Maths Num.",
-  "R214": "📉 Analyse Signaux",
-  "SAE201": "🏢 SAÉ Réseau PME",
-  "SAE202": "📏 SAÉ Mesure",
-  "SAE203": "🏢 SAÉ Info Ent.",
-  "SAE204": "🚀 SAÉ Projet",
-  "SAE205": "📂 Portfolio",
-  "SAE21": "🏢 SAÉ Réseau PME",
-  "SAE22": "📏 SAÉ Mesure",
-  "SAE23": "🏢 SAÉ Info Ent.",
-  "SAE24": "🚀 SAÉ Projet",
-  "SAE25": "📂 Portfolio"
+  "R101": {
+    "name": "Init. Réseaux",
+    "emoji": "🌐",
+    "color": "7",
+    "coefs": {
+      "UE1.1": 13,
+      "UE1.2": 4,
+      "UE1.3": 4
+    }
+  },
+  "R102": {
+    "name": "Archi. Réseaux",
+    "emoji": "🔀",
+    "color": "7",
+    "coefs": {
+      "UE1.1": 12
+    }
+  },
+  "R103": {
+    "name": "Réseaux Locaux",
+    "emoji": "🔧",
+    "color": "7",
+    "coefs": {
+      "UE1.1": 7,
+      "UE1.2": 2,
+      "UE1.3": 2
+    }
+  },
+  "R104": {
+    "name": "Syst. Élec.",
+    "emoji": "⚡",
+    "color": "4",
+    "coefs": {
+      "UE1.1": 8,
+      "UE1.2": 8
+    }
+  },
+  "R105": {
+    "name": "Supports Trans.",
+    "emoji": "📡",
+    "color": "4",
+    "coefs": {
+      "UE1.2": 6
+    }
+  },
+  "R106": {
+    "name": "Archi. Numérique",
+    "emoji": "🖥️",
+    "color": "3",
+    "coefs": {
+      "UE1.1": 5,
+      "UE1.3": 5
+    }
+  },
+  "R107": {
+    "name": "Prog. Fondamentaux",
+    "emoji": "🐍",
+    "color": "9",
+    "coefs": {
+      "UE1.3": 19
+    }
+  },
+  "R108": {
+    "name": "Syst. Exploitation",
+    "emoji": "🐧",
+    "color": "3",
+    "coefs": {
+      "UE1.1": 6,
+      "UE1.3": 6
+    }
+  },
+  "R109": {
+    "name": "Tech. Web",
+    "emoji": "🌍",
+    "color": "9",
+    "coefs": {
+      "UE1.3": 4
+    }
+  },
+  "R110": {
+    "name": "Anglais Tech.",
+    "emoji": "🇬🇧",
+    "color": "5",
+    "coefs": {
+      "UE1.1": 5,
+      "UE1.2": 5,
+      "UE1.3": 5
+    }
+  },
+  "R111": {
+    "name": "Com. Pro.",
+    "emoji": "🗣️",
+    "color": "6",
+    "coefs": {
+      "UE1.1": 4,
+      "UE1.2": 5,
+      "UE1.3": 5
+    }
+  },
+  "R112": {
+    "name": "PPP",
+    "emoji": "🤝",
+    "color": "6",
+    "coefs": {
+      "UE1.1": 2,
+      "UE1.2": 2,
+      "UE1.3": 2
+    }
+  },
+  "R113": {
+    "name": "Maths Signal",
+    "emoji": "〰️",
+    "color": "2",
+    "coefs": {
+      "UE1.1": 5,
+      "UE1.2": 9
+    }
+  },
+  "R114": {
+    "name": "Maths Trans.",
+    "emoji": "📈",
+    "color": "2",
+    "coefs": {
+      "UE1.1": 5,
+      "UE1.2": 9
+    }
+  },
+  "R115": {
+    "name": "Gestion Projet",
+    "emoji": "📅",
+    "color": "10",
+    "coefs": {
+      "UE1.2": 3,
+      "UE1.3": 3
+    }
+  },
+  "SAE101": {
+    "name": "SAÉ Cyber",
+    "emoji": "🛡️",
+    "color": "1",
+    "coefs": {
+      "UE1.1": 10
+    }
+  },
+  "SAE102": {
+    "name": "SAÉ Réseaux",
+    "emoji": "🕸️",
+    "color": "1",
+    "coefs": {
+      "UE1.1": 31
+    }
+  },
+  "SAE103": {
+    "name": "SAÉ Trans.",
+    "emoji": "📡",
+    "color": "1",
+    "coefs": {
+      "UE1.2": 36
+    }
+  },
+  "SAE104": {
+    "name": "SAÉ Web",
+    "emoji": "🌐",
+    "color": "1",
+    "coefs": {
+      "UE1.3": 8
+    }
+  },
+  "SAE105": {
+    "name": "SAÉ Données",
+    "emoji": "📊",
+    "color": "1",
+    "coefs": {
+      "UE1.3": 35
+    }
+  },
+  "SAE106": {
+    "name": "Portfolio",
+    "emoji": "📂",
+    "color": "1",
+    "coefs": {}
+  },
+  "SAE11": {
+    "name": "SAÉ Cyber",
+    "emoji": "🛡️",
+    "color": "1",
+    "coefs": {
+      "UE1.1": 10
+    }
+  },
+  "SAE12": {
+    "name": "SAÉ Réseaux",
+    "emoji": "🕸️",
+    "color": "1",
+    "coefs": {
+      "UE1.1": 31
+    }
+  },
+  "SAE13": {
+    "name": "SAÉ Trans.",
+    "emoji": "📡",
+    "color": "1",
+    "coefs": {
+      "UE1.2": 36
+    }
+  },
+  "SAE14": {
+    "name": "SAÉ Web",
+    "emoji": "🌐",
+    "color": "1",
+    "coefs": {
+      "UE1.3": 8
+    }
+  },
+  "SAE15": {
+    "name": "SAÉ Données",
+    "emoji": "📊",
+    "color": "1",
+    "coefs": {
+      "UE1.3": 35
+    }
+  },
+  "SAE16": {
+    "name": "Portfolio",
+    "emoji": "📂",
+    "color": "1",
+    "coefs": {}
+  },
+  "R201": {
+    "name": "Tech. Internet",
+    "emoji": "☁️",
+    "color": "7",
+    "coefs": {
+      "UE2.1": 15,
+      "UE2.2": 5,
+      "UE2.3": 5
+    }
+  },
+  "R202": {
+    "name": "Admin Sys.",
+    "emoji": "🛠️",
+    "color": "3",
+    "coefs": {
+      "UE2.1": 10,
+      "UE2.3": 3
+    }
+  },
+  "R203": {
+    "name": "Services Réseaux",
+    "emoji": "🔗",
+    "color": "7",
+    "coefs": {
+      "UE2.1": 13
+    }
+  },
+  "R204": {
+    "name": "Téléphonie",
+    "emoji": "☎️",
+    "color": "7",
+    "coefs": {
+      "UE2.1": 7,
+      "UE2.2": 3,
+      "UE2.3": 3
+    }
+  },
+  "R205": {
+    "name": "Signaux Trans.",
+    "emoji": "🌊",
+    "color": "4",
+    "coefs": {
+      "UE2.1": 5,
+      "UE2.2": 10
+    }
+  },
+  "R206": {
+    "name": "Numérisation",
+    "emoji": "🔢",
+    "color": "4",
+    "coefs": {
+      "UE2.1": 3,
+      "UE2.2": 7
+    }
+  },
+  "R207": {
+    "name": "Sources Données",
+    "emoji": "🗃️",
+    "color": "9",
+    "coefs": {
+      "UE2.1": 1,
+      "UE2.3": 7
+    }
+  },
+  "R208": {
+    "name": "Traitement Données",
+    "emoji": "🧮",
+    "color": "9",
+    "coefs": {
+      "UE2.3": 7
+    }
+  },
+  "R209": {
+    "name": "Dev Web",
+    "emoji": "💻",
+    "color": "9",
+    "coefs": {
+      "UE2.1": 3,
+      "UE2.3": 8
+    }
+  },
+  "R210": {
+    "name": "Anglais Tech.",
+    "emoji": "🇺🇸",
+    "color": "5",
+    "coefs": {
+      "UE2.1": 12,
+      "UE2.2": 4,
+      "UE2.3": 4
+    }
+  },
+  "R211": {
+    "name": "Com. Pro.",
+    "emoji": "📢",
+    "color": "6",
+    "coefs": {
+      "UE2.1": 6,
+      "UE2.2": 4,
+      "UE2.3": 4
+    }
+  },
+  "R212": {
+    "name": "PPP",
+    "emoji": "🧭",
+    "color": "6",
+    "coefs": {
+      "UE2.1": 2,
+      "UE2.2": 2,
+      "UE2.3": 2
+    }
+  },
+  "R213": {
+    "name": "Maths Num.",
+    "emoji": "➗",
+    "color": "2",
+    "coefs": {
+      "UE2.1": 3,
+      "UE2.2": 3,
+      "UE2.3": 5
+    }
+  },
+  "R214": {
+    "name": "Analyse Signaux",
+    "emoji": "📉",
+    "color": "2",
+    "coefs": {
+      "UE2.1": 4,
+      "UE2.2": 9
+    }
+  },
+  "SAE201": {
+    "name": "SAÉ Réseau PME",
+    "emoji": "🏢",
+    "color": "1",
+    "coefs": {
+      "UE2.1": 20
+    }
+  },
+  "SAE202": {
+    "name": "SAÉ Mesure",
+    "emoji": "📏",
+    "color": "1",
+    "coefs": {
+      "UE2.2": 20
+    }
+  },
+  "SAE203": {
+    "name": "SAÉ Info Ent.",
+    "emoji": "🏢",
+    "color": "1",
+    "coefs": {
+      "UE2.3": 25
+    }
+  },
+  "SAE204": {
+    "name": "SAÉ Projet",
+    "emoji": "🚀",
+    "color": "1",
+    "coefs": {
+      "UE2.1": 17,
+      "UE2.2": 15,
+      "UE2.3": 17
+    }
+  },
+  "SAE205": {
+    "name": "Portfolio",
+    "emoji": "📂",
+    "color": "1",
+    "coefs": {
+      "UE2.1": 2,
+      "UE2.2": 2,
+      "UE2.3": 2
+    }
+  },
+  "SAE21": {
+    "name": "SAÉ Réseau PME",
+    "emoji": "🏢",
+    "color": "1",
+    "coefs": {
+      "UE2.1": 20
+    }
+  },
+  "SAE22": {
+    "name": "SAÉ Mesure",
+    "emoji": "📏",
+    "color": "1",
+    "coefs": {
+      "UE2.2": 20
+    }
+  },
+  "SAE23": {
+    "name": "SAÉ Info Ent.",
+    "emoji": "🏢",
+    "color": "1",
+    "coefs": {
+      "UE2.3": 25
+    }
+  },
+  "SAE24": {
+    "name": "SAÉ Projet",
+    "emoji": "🚀",
+    "color": "1",
+    "coefs": {
+      "UE2.1": 17,
+      "UE2.2": 15,
+      "UE2.3": 17
+    }
+  },
+  "SAE25": {
+    "name": "Portfolio",
+    "emoji": "📂",
+    "color": "1",
+    "coefs": {
+      "UE2.1": 2,
+      "UE2.2": 2,
+      "UE2.3": 2
+    }
+  }
 }
