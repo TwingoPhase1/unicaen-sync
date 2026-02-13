@@ -256,10 +256,14 @@ def classify_event(event, cours_mapping, sorted_codes):
     type_label = ""
     desc_upper = (event.description or "").upper()
 
-    if re.search(r'\bEXAM\b|\bEVALUATION\b|\bPARTIEL\b|\bDS\b', search_zone):
+    if re.search(r'\bEXAM\b|\bEVALUATION\b|\bPARTIEL\b|\bDS\b|\bEXAMENS?\b', search_zone):
         emoji_type = "🚨"
         type_label = "Examen"
         color_id = COLOR_EXAMEN  # Rouge pour les examens, prioritaire
+    elif re.search(r'\b(SA[EÉ]|PROJET)', title_upper):
+        emoji_type = "🚀"
+        type_label = "SAÉ"
+        color_id = "1"  # Lavande
     elif re.search(r'\bTP\b', title_upper):
         emoji_type = "💻"
         type_label = "TP"
