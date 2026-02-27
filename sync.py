@@ -728,6 +728,13 @@ def execute_batch(service, requests_list):
         batch.execute()
 
 
+def normalize_dt(dt_string):
+    """Normalise une datetime string pour comparaison stable (Z ↔ +00:00)."""
+    if not dt_string:
+        return ""
+    return dt_string.replace("Z", "+00:00")
+
+
 def should_delete(ev_id, google_events_map):
     """Détermine si un événement Google doit être supprimé."""
     event = google_events_map.get(ev_id)
@@ -807,10 +814,10 @@ def sync_to_google(events_payload_map, full_sync=False):
             needs_update = True
         elif new_data.get('colorId') != old_data.get('colorId', ''):
             needs_update = True
-        # Vérifier les changements d'horaire (start/end)
-        elif new_data['start'].get('dateTime') != old_data.get('start', {}).get('dateTime', ''):
+        # Vérifier les changements d'horaire (start/end) — normaliser Z ↔ +00:00
+        elif normalize_dt(new_data['start'].get('dateTime')) != normalize_dt(old_data.get('start', {}).get('dateTime', '')):
             needs_update = True
-        elif new_data['end'].get('dateTime') != old_data.get('end', {}).get('dateTime', ''):
+        elif normalize_dt(new_data['end'].get('dateTime')) != normalize_dt(old_data.get('end', {}).get('dateTime', '')):
             needs_update = True
 
         # S'assurer que les métadonnées V4.0 sont présentes
