@@ -113,7 +113,13 @@ def check_new_imap_messages():
             server.select_folder('INBOX')
             messages = server.search(['UID', f'{last_uid+1}:*']) if last_uid > 0 else server.search('ALL')
             messages = [uid for uid in messages if uid > last_uid]
-            return len(messages) > 0
+            
+            # Maj de l'état même si on s'arrête là
+            if messages:
+                with open(MAIL_SYNC_STATE_FILE, 'w') as f:
+                    f.write(str(max(messages)))
+                return True
+            return False
     except Exception as e:
         logger.error(f"❌ Erreur IMAP (fast check) : {e}")
         return False
@@ -755,6 +761,7 @@ def sync_to_google(events_payload_map, full_sync=False):
     list_params = {
         'calendarId': CALENDAR_ID,
         'singleEvents': True,
+        'privateExtendedProperty': 'createdBy=unicaen-sync-bot',
         'maxResults': 2500,
     }
     if not full_sync:
@@ -807,6 +814,7 @@ def sync_to_google(events_payload_map, full_sync=False):
             needs_update = True
 
         # S'assurer que les métadonnées V4.0 sont présentes
+        # Si on n'a pas old_props mais qu'on a le event, par défaut on met update pour injecter la V4
         old_props = old_data.get('extendedProperties', {}).get('private', {})
         if old_props.get('version') != '4.0':
             needs_update = True
