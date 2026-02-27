@@ -420,6 +420,14 @@ def parse_events(ics_text, cours_mapping, full_sync=False):
             logger.warning(f"⚠️ Erreur de date sur un événement : {e}")
             continue
 
+        # Calculer le jour pour pouvoir attribuer le flag 'premier cours' avant filtrage
+        event_start_paris = event_start.replace(tzinfo=UTC_TZ).astimezone(PARIS_TZ)
+        day_key = event_start_paris.strftime('%Y-%m-%d')
+
+        is_first_of_day = day_key not in seen_days
+        if is_first_of_day:
+            seen_days.add(day_key)
+
         # On garde si la FIN est dans le futur (sauf en mode --full)
         if not full_sync and event_end <= now_aware:
             continue
@@ -436,14 +444,6 @@ def parse_events(ics_text, cours_mapping, full_sync=False):
         unique_id = generate_stable_id(event_uid)
 
         # --- ALARME & DESCRIPTION ENRICHIE ---
-        # Calculer le jour en timezone Paris (pas UTC)
-        event_start_paris = event_start.replace(tzinfo=UTC_TZ).astimezone(PARIS_TZ)
-        day_key = event_start_paris.strftime('%Y-%m-%d')
-
-        is_first_of_day = day_key not in seen_days
-        if is_first_of_day:
-            seen_days.add(day_key)
-
         desc = enrich_description(event.description, cours_data, matched_code, is_first_of_day)
 
         # Build original data payload
@@ -770,6 +770,7 @@ def sync_to_google(events_payload_map, full_sync=False):
         'singleEvents': True,
         'privateExtendedProperty': 'createdBy=unicaen-sync-bot',
         'maxResults': 2500,
+        'timeZone': 'UTC',
     }
     if not full_sync:
         now_str = datetime.datetime.now(UTC_TZ).isoformat().replace("+00:00", "Z")
@@ -805,12 +806,15 @@ def sync_to_google(events_payload_map, full_sync=False):
         new_data = events_payload_map[eid]
         old_data = google_events_map[eid]
 
+        def normalize_str(s):
+            return s.replace('\r\n', '\n').strip() if s else ""
+
         needs_update = False
-        if new_data['summary'] != old_data.get('summary', ''):
+        if normalize_str(new_data['summary']) != normalize_str(old_data.get('summary', '')):
             needs_update = True
-        elif new_data['description'] != old_data.get('description', ''):
+        elif normalize_str(new_data['description']) != normalize_str(old_data.get('description', '')):
             needs_update = True
-        elif new_data['location'] != old_data.get('location', ''):
+        elif normalize_str(new_data['location']) != normalize_str(old_data.get('location', '')):
             needs_update = True
         elif new_data.get('colorId') != old_data.get('colorId', ''):
             needs_update = True
