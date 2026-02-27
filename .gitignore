@@ -1,0 +1,7 @@
+.env
+*.json
+.overrides.json
+.mail_sync_state
+missing_subjects.txt
+__pycache__/
+*.log

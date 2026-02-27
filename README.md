@@ -1,4 +1,4 @@
-# 📅 Unicaen EDT Sync v3.0
+# 📅 Unicaen EDT Sync v4.0
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](https://www.docker.com/)
@@ -21,6 +21,8 @@
 | 🛡️ Safe Delete | Métadonnées privées (`extendedProperties`) : le bot ne supprime jamais vos événements personnels. |
 | 📝 Auto-Discovery | Codes matières inconnus loggés dans `missing_subjects.txt`. |
 | 🔁 Mode Full | `--full` pour resync tous les événements, passés inclus. |
+| 📧 Mail Sync Bypass | `--mail` Scrappe les modifications urgentes (ICS) envoyées par la scolarité et update l'agenda (+ Bypass rapide optimisé si aucun nouveau mail). |
+| 🔔 Alerte Discord | (Optionnel) Reçois un ping sur Discord dès que la scolarité t'envoie un mail de modification d'emploi du temps. |
 
 ## 🚀 Installation
 
@@ -45,6 +47,14 @@ ENT_USER=22xxxxx
 ENT_PASS=votre_mot_de_passe
 CALENDAR_ID=xxxxxxxx@group.calendar.google.com
 SHOW_HACK_CAMPUS=true
+
+# (Optionnel) Pour synchroniser les changements via mail
+IMAP_SERVER=zcs.unicaen.fr
+IMAP_USER=prenom.nom@etu.unicaen.fr
+IMAP_PASS=votre_mot_de_passe
+
+# (Optionnel) Pour recevoir une notification Discord lors d'un changement de cours
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 ```
 
 ### 4. Dictionnaire (mapping.json)
@@ -92,20 +102,28 @@ docker run --rm --env-file .env unicaen-sync
 
 # Run (TOUS les événements, passés inclus)
 docker run --rm --env-file .env unicaen-sync python sync.py --full
+
+# Run (Vérification et réconciliation via Mail UNIQUEMENT)
+docker run --rm --env-file .env unicaen-sync python sync.py --mail
 ```
 
-### Automatisation (Crontab)
+### Automatisation (Crontab optimisé)
 
-Sync à 00h, 06h, 12h et 15h :
+Il est recommandé de lancer le script de base (`--mail`) fréquemment pour les mises à jour de salles, et un `--full` une fois par jour au cas où Zimbra se met à jour silencieusement dans le passé :
+
 ```bash
-0 0,6,12,15 * * * docker run --rm --env-file /chemin/vers/.env unicaen-sync >> /chemin/vers/unicaen.log 2>&1
+# Vérification des nouveaux mails uniquement (extrêmement rapide) - Toutes les 15 mins (de 7h à 20h)
+*/15 07-20 * * * docker run --rm --env-file /chemin/vers/.env unicaen-sync python sync.py --mail >> /chemin/vers/unicaen-mail.log 2>&1
+
+# Synchro complète avec l'ADE Zimbra - Tous les jours à 02h00
+0 2 * * * docker run --rm --env-file /chemin/vers/.env unicaen-sync python sync.py --full >> /chemin/vers/unicaen-full.log 2>&1
 ```
 
 ## 📁 Structure
 
 | Fichier | Rôle |
 |---------|------|
-| `sync.py` | Script principal V3.0 |
+| `sync.py` | Script principal V4.0 |
 | `mapping.json` | Matières : emoji + couleur + coefficients |
 | `Dockerfile` | Image Docker (Python 3.11, TZ Paris) |
 | `requirements.txt` | Dépendances Python |

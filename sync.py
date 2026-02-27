@@ -12,6 +12,9 @@ import re
 import json
 import logging
 import argparse
+import email
+from email.header import decode_header
+from imapclient import IMAPClient
 from zoneinfo import ZoneInfo
 
 # --- Optionnel : charger .env en local ---
@@ -46,6 +49,14 @@ CALENDAR_ID = os.getenv("CALENDAR_ID")
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_PKEY_PATH", 'credentials.json')
 MAPPING_FILE = 'mapping.json'
 MISSING_LOG_FILE = 'missing_subjects.txt'
+OVERRIDES_FILE = '.overrides.json'
+MAIL_SYNC_STATE_FILE = '.mail_sync_state'
+
+IMAP_SERVER = os.getenv("IMAP_SERVER")
+IMAP_USER = os.getenv("IMAP_USER")
+IMAP_PASS = os.getenv("IMAP_PASS")
+
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 # Gestion Hack Ecampus
 show_hack_env = os.getenv("SHOW_HACK_CAMPUS", "true").lower()
@@ -67,10 +78,13 @@ COLOR_DEFAULT = "9"    # Myrtille (bleu)
 #  FONCTIONS UTILITAIRES
 # =============================================================================
 
-def validate_config():
+def validate_config(check_imap=False):
     """Vérifie que toutes les variables d'environnement et fichiers requis sont présents."""
     if not all([ICS_URL, USERNAME, PASSWORD, CALENDAR_ID]):
         logger.critical("❌ CRITIQUE : Variables d'environnement manquantes (.env)")
+        sys.exit(1)
+    if check_imap and not all([IMAP_SERVER, IMAP_USER, IMAP_PASS]):
+        logger.critical("❌ CRITIQUE : Variables IMAP manquantes pour l'usage du scraping mail.")
         sys.exit(1)
     if not os.path.exists(MAPPING_FILE):
         logger.critical(f"❌ CRITIQUE : Fichier '{MAPPING_FILE}' introuvable.")
@@ -78,6 +92,31 @@ def validate_config():
     if not os.path.exists(SERVICE_ACCOUNT_FILE):
         logger.critical(f"❌ ERREUR : {SERVICE_ACCOUNT_FILE} introuvable.")
         sys.exit(1)
+
+def check_new_imap_messages():
+    """Vérifie s'il y a de nouveaux mails sans télécharger le calendrier entier."""
+    last_uid = 0
+    if os.path.exists(MAIL_SYNC_STATE_FILE):
+        try:
+            with open(MAIL_SYNC_STATE_FILE, 'r') as f:
+                last_uid = int(f.read().strip())
+        except:
+            last_uid = 0
+
+    import ssl
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with IMAPClient(IMAP_SERVER, use_uid=True, ssl=True, ssl_context=ctx) as server:
+            server.login(IMAP_USER, IMAP_PASS)
+            server.select_folder('INBOX')
+            messages = server.search(['UID', f'{last_uid+1}:*']) if last_uid > 0 else server.search('ALL')
+            messages = [uid for uid in messages if uid > last_uid]
+            return len(messages) > 0
+    except Exception as e:
+        logger.error(f"❌ Erreur IMAP (fast check) : {e}")
+        return False
 
 
 def load_mapping():
@@ -91,6 +130,46 @@ def load_mapping():
         logger.critical(f"❌ CRITIQUE : Erreur de syntaxe JSON dans {MAPPING_FILE} : {e}")
         sys.exit(1)
 
+
+def load_overrides():
+    """Charge les dérogations locales issues des mails (nouveaux horaires, lieux)."""
+    if not os.path.exists(OVERRIDES_FILE):
+        return {}
+    try:
+        with open(OVERRIDES_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"⚠️ Erreur de lecture de {OVERRIDES_FILE}: {e}")
+        return {}
+
+
+def save_overrides(overrides):
+    """Sauvegarde les dérogations locales."""
+    try:
+        with open(OVERRIDES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(overrides, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"❌ Erreur de sauvegarde de {OVERRIDES_FILE}: {e}")
+
+
+def send_discord_notification(title, description, color=16711680):
+    """Envoie une notification Discord via Webhook si configuré."""
+    if not DISCORD_WEBHOOK_URL:
+        return
+
+    payload = {
+        "embeds": [{
+            "title": title,
+            "description": description,
+            "color": color,
+            "timestamp": datetime.datetime.now(UTC_TZ).isoformat()
+        }]
+    }
+
+    try:
+        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
+    except Exception as e:
+        logger.warning(f"⚠️ Échec de l'envoi de la notification Discord : {e}")
 
 def download_ics():
     """Télécharge le fichier ICS depuis l'ENT avec retry automatique."""
@@ -197,7 +276,7 @@ def enrich_description(raw_desc, cours_data, matched_code, is_first_of_day):
     return "\n".join(parts)
 
 
-def classify_event(event, cours_mapping, sorted_codes):
+def classify_event(event, cours_mapping, compiled_codes):
     """
     Classifie un événement ICS et retourne le titre formaté + données matière.
 
@@ -228,8 +307,8 @@ def classify_event(event, cours_mapping, sorted_codes):
     color_id = COLOR_DEFAULT
 
     # Tri par longueur décroissante pour éviter que R11 match avant R110
-    for code in sorted_codes:
-        if re.search(rf'\b{re.escape(code)}\b', search_zone, re.IGNORECASE):
+    for code, regex in compiled_codes.items():
+        if regex.search(search_zone):
             data = cours_mapping[code]
             subj_emoji = data.get("emoji", "")
             subj_name = data.get("name", code)
@@ -260,30 +339,26 @@ def classify_event(event, cours_mapping, sorted_codes):
         emoji_type = "🚨"
         type_label = "Examen"
         color_id = COLOR_EXAMEN  # Rouge pour les examens, prioritaire
-    elif re.search(r'\b(SA[EÉ]|PROJET)', title_upper):
+    elif re.search(r'\b(SA[EÉ]|PROJET)\b', title_upper):
         emoji_type = "🚀"
         type_label = "SAÉ"
         color_id = "1"  # Lavande
-    elif re.search(r'\bTP\b', title_upper):
-        emoji_type = "💻"
-        type_label = "TP"
-    elif re.search(r'\bTD\b', title_upper):
-        emoji_type = "✏️"
-        type_label = "TD"
-    elif re.search(r'\bCM\b|\bAMPHI\b', title_upper):
-        emoji_type = "🎤"
-        type_label = "CM"
-    elif re.search(r'\bSOUTIEN\b', title_upper):
-        emoji_type = "🆘"
-        type_label = "Soutien"
-    elif not re.search(r'\bTP\b|\bTD\b|\bCM\b', title_upper):
-        # Fallback : chercher dans la description
-        if re.search(r'\bTP\b', desc_upper):
-            emoji_type = "💻"; type_label = "TP"
-        elif re.search(r'\bTD\b', desc_upper):
-            emoji_type = "✏️"; type_label = "TD"
-        elif re.search(r'\bCM\b', desc_upper):
-            emoji_type = "🎤"; type_label = "CM"
+    else:
+        # Optimisation : Chercher TD, TP, CM en priorisant le titre, puis la description
+        match_title = re.search(r'\b(TP|TD|CM|AMPHI|SOUTIEN)\b', title_upper)
+        if match_title:
+            typ = match_title.group(1)
+            if typ == "TP": emoji_type, type_label = "💻", "TP"
+            elif typ == "TD": emoji_type, type_label = "✏️", "TD"
+            elif typ in ["CM", "AMPHI"]: emoji_type, type_label = "🎤", "CM"
+            elif typ == "SOUTIEN": emoji_type, type_label = "🆘", "Soutien"
+        else:
+            match_desc = re.search(r'\b(TP|TD|CM)\b', desc_upper)
+            if match_desc:
+                typ = match_desc.group(1)
+                if typ == "TP": emoji_type, type_label = "💻", "TP"
+                elif typ == "TD": emoji_type, type_label = "✏️", "TD"
+                elif typ == "CM": emoji_type, type_label = "🎤", "CM"
 
     # --- Construction du titre final ---
     if type_label == "Examen":
@@ -306,7 +381,7 @@ def generate_stable_id(event_uid):
 
 def parse_events(ics_text, cours_mapping, full_sync=False):
     """Parse le fichier ICS et retourne les événements transformés."""
-    logger.info("⚙️ Analyse V3.0...")
+    logger.info("⚙️ Analyse V4.0...")
     try:
         cal = Calendar(ics_text)
     except Exception as e:
@@ -315,8 +390,9 @@ def parse_events(ics_text, cours_mapping, full_sync=False):
 
     now_aware = datetime.datetime.now(UTC_TZ)
 
-    # Pré-trier les codes par longueur décroissante (SAE101 avant SAE11, R110 avant R11)
+    # Pré-trier les codes par longueur décroissante et compiler pour des perfs x10
     sorted_codes = sorted(cours_mapping.keys(), key=len, reverse=True)
+    compiled_codes = {code: re.compile(rf'\b{re.escape(code)}\b', re.IGNORECASE) for code in sorted_codes}
 
     events_payload_map = {}
     seen_days = set()
@@ -344,7 +420,7 @@ def parse_events(ics_text, cours_mapping, full_sync=False):
 
         # Classification
         final_summary, color_id, matched_code, cours_data, missing_code = classify_event(
-            event, cours_mapping, sorted_codes
+            event, cours_mapping, compiled_codes
         )
         if missing_code:
             missing_codes.add(missing_code)
@@ -364,6 +440,7 @@ def parse_events(ics_text, cours_mapping, full_sync=False):
 
         desc = enrich_description(event.description, cours_data, matched_code, is_first_of_day)
 
+        # Build original data payload
         event_body = {
             'id': unique_id,
             'summary': final_summary,
@@ -376,14 +453,237 @@ def parse_events(ics_text, cours_mapping, full_sync=False):
             'extendedProperties': {
                 'private': {
                     'createdBy': 'unicaen-sync-bot',
-                    'version': '3.0'
+                    'version': '4.0'
                 }
             }
         }
+        
         events_payload_map[unique_id] = event_body
 
     return events_payload_map, missing_codes
 
+
+def apply_overrides(events_payload_map):
+    """
+    Vérifie les dérogations :
+    Si Zimbra est mis à jour -> on supprime la dérogation.
+    Si Zimbra n'est pas encore à jour -> on applique la dérogation sur events_payload_map.
+    """
+    overrides = load_overrides()
+    if not overrides:
+        return events_payload_map
+
+    overrides_to_remove = set()
+    
+    for zimbra_id, override_data in overrides.items():
+        if zimbra_id not in events_payload_map:
+            continue
+            
+        zimbra_event = events_payload_map[zimbra_id]
+        
+        # Extrait les infos pour vérification
+        z_start = zimbra_event['start']['dateTime']
+        z_end = zimbra_event['end']['dateTime']
+        z_loc = zimbra_event.get('location', '')
+        
+        o_start = override_data['start']
+        o_end = override_data['end']
+        o_loc = override_data.get('location', '')
+        
+        # Si Zimbra a désormais les mêmes dates ET lieu que la dérogation -> Zimbra est à jour !
+        if z_start == o_start and z_end == o_end and z_loc == o_loc:
+            logger.info(f"👍 Zimbra a été mis à jour pour l'événement {zimbra_id}. Dérogation annulée.")
+            overrides_to_remove.add(zimbra_id)
+        else:
+            # Zimbra pas à jour -> on applique la rustine
+            logger.info(f"🔄 Application de la dérogation mail sur l'événement {zimbra_id}.")
+            zimbra_event['start']['dateTime'] = o_start
+            zimbra_event['end']['dateTime'] = o_end
+            if o_loc:
+                zimbra_event['location'] = o_loc
+            
+            # Tags visuels
+            if not zimbra_event['summary'].startswith("🔄️"):
+                zimbra_event['summary'] = f"🔄️ {zimbra_event['summary']}"
+            
+            mail_notice = "🔄️ Changement via mail de la scolarité 🔄️\n\n"
+            if mail_notice not in zimbra_event['description']:
+                zimbra_event['description'] = mail_notice + zimbra_event['description']
+                
+    # Nettoyage des dérogations devenues inutiles
+    if overrides_to_remove:
+        for z_id in overrides_to_remove:
+            del overrides[z_id]
+        save_overrides(overrides)
+
+    return events_payload_map
+
+
+def fetch_latest_ics_from_mail(cours_mapping, events_payload_map):
+    """
+    Se connecte en IMAP, cherche les nouveaux mails avec fichiers .ics (ou .vcs).
+    Enregistre les dérogations si pertinentes.
+    """
+    if not IMAP_SERVER or not IMAP_USER or not IMAP_PASS:
+        logger.info("ℹ️ Identifiants IMAP non configurés. Ignorance de la recherche de mails.")
+        return
+        
+    last_uid = 0
+    if os.path.exists(MAIL_SYNC_STATE_FILE):
+        try:
+            with open(MAIL_SYNC_STATE_FILE, 'r') as f:
+                last_uid = int(f.read().strip())
+        except:
+            last_uid = 0
+
+    import ssl
+    logger.info("📧 Connexion à la boîte mail...")
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with IMAPClient(IMAP_SERVER, use_uid=True, ssl=True, ssl_context=ctx) as server:
+            server.login(IMAP_USER, IMAP_PASS)
+            server.select_folder('INBOX')
+
+            messages = server.search(['UID', f'{last_uid+1}:*']) if last_uid > 0 else server.search('ALL')
+            messages = [uid for uid in messages if uid > last_uid]
+            
+            if not messages:
+                logger.info("💤 Aucun nouveau message à analyser.")
+                return
+
+            # Ne traiter que les plus récents (limite sécurité)
+            new_msgs = messages[-50:]
+            
+            overrides = load_overrides()
+            new_uid_state = last_uid
+            
+            # Trier les clés de codes matières par longueur et compiler
+            sorted_codes = sorted(cours_mapping.keys(), key=len, reverse=True)
+            compiled_codes = {code: re.compile(rf'\b{re.escape(code)}\b', re.IGNORECASE) for code in sorted_codes}
+            
+            # Créer un cache O(1) pour les dates des événements Zimbra (pour l'algorithme find_matching_zimbra_event)
+            events_by_date = {}
+            for z_id, z_event in events_payload_map.items():
+                z_start = datetime.datetime.fromisoformat(z_event['start']['dateTime']).date()
+                if z_start not in events_by_date:
+                    events_by_date[z_start] = []
+                events_by_date[z_start].append((z_id, z_event))
+            
+            for msg_uid in new_msgs:
+                new_uid_state = max(new_uid_state, msg_uid)
+                try:
+                    res = server.fetch(msg_uid, ['RFC822'])
+                    # res[msg_uid] contains the data, check for b'RFC822'
+                    msg_data = res[msg_uid]
+                    if b'RFC822' in msg_data:
+                        raw_email = msg_data[b'RFC822']
+                    else:
+                        continue
+                        
+                    msg = email.message_from_bytes(raw_email)
+                    
+                    # Chercher la pièce jointe
+                    process_mail_parts(msg, msg_uid, overrides, events_by_date, compiled_codes)
+                except Exception as inner_e:
+                    logger.warning(f"⚠️ Impossible de parser le mail UID {msg_uid}: {inner_e}")
+                
+            # Sauvegarder
+            save_overrides(overrides)
+            with open(MAIL_SYNC_STATE_FILE, 'w') as f:
+                f.write(str(new_uid_state))
+            
+            logger.info("✅ Vérification des mails terminée.")
+
+    except Exception as e:
+        logger.error(f"❌ Erreur IMAP : {e}")
+
+
+def find_matching_zimbra_event(mail_event, events_by_date, compiled_codes):
+    """
+    Tente de lier l'événement mail à un événement Zimbra existant via la matière
+    et la proximité calendaire (même jour).
+    """
+    original_title = mail_event.name.strip().upper()
+    search_zone = (mail_event.name + " " + (mail_event.description or "")).upper()
+    
+    matched_code = None
+    for code, regex in compiled_codes.items():
+        if regex.search(search_zone):
+            matched_code = code
+            break
+            
+    if not matched_code:
+        return None
+        
+    try:
+        mail_start = mail_event.begin.to('utc').datetime.date()
+    except:
+        return None
+        
+    # Match via the date index O(1)
+    if mail_start in events_by_date:
+        for z_id, z_event in events_by_date[mail_start]:
+            z_search_zone = (z_event['summary'] + " " + z_event['description']).upper()
+            if re.search(rf'\b{re.escape(matched_code)}\b', z_search_zone, re.IGNORECASE):
+                return z_id
+                
+    return None
+
+def process_mail_parts(msg, msg_uid, overrides, events_by_date, compiled_codes):
+    for part in msg.walk():
+        if part.get_content_maintype() == 'multipart':
+            continue
+        if part.get('Content-Disposition') is None:
+            continue
+            
+        filename = part.get_filename()
+        if not filename:
+            continue
+            
+        if filename.lower().endswith('.ics') or filename.lower().endswith('.vcs'):
+            logger.info(f"📎 Trouvé fichier de calendrier : {filename}")
+            try:
+                content = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                cal = Calendar(content)
+                for mail_ev in cal.events:
+                    z_id = find_matching_zimbra_event(mail_ev, events_by_date, compiled_codes)
+                    if z_id:
+                        logger.info(f"🔗 Liaison réussie : Le mail corrige l'événement Zimbra {z_id}")
+                        o_start = mail_ev.begin.to('utc').datetime.isoformat()
+                        o_end = mail_ev.end.to('utc').datetime.isoformat()
+                        o_loc = mail_ev.location or ""
+                        
+                        overrides[z_id] = {
+                            "start": o_start,
+                            "end": o_end,
+                            "location": o_loc,
+                            "uid_source": msg_uid
+                        }
+                        
+                        # Notification Discord
+                        try:
+                            z_summary = "[Inconnu]"
+                            for _, stored_ev in events_by_date.get(mail_ev.begin.to('utc').datetime.date(), []):
+                                if _ == z_id:
+                                    z_summary = stored_ev.get('summary', z_summary)
+                                    break
+                            
+                            discord_msg = (
+                                f"**Matière :** {z_summary}\n"
+                                f"**Nouvelle date :** {mail_ev.begin.to('utc').datetime.astimezone(PARIS_TZ).strftime('%d/%m/%Y %H:%M')} ➔ {mail_ev.end.to('utc').datetime.astimezone(PARIS_TZ).strftime('%H:%M')}\n"
+                            )
+                            if o_loc:
+                                discord_msg += f"**Nouveau lieu :** {o_loc}"
+                                
+                            send_discord_notification("🚨 Modification d'Emploi du Temps", discord_msg, color=16753920) # Orange
+                        except Exception as e:
+                            logger.error(f"Erreur formattage discord : {e}")
+                    else:
+                        logger.warning(f"⚠️ Impossible de lier l'événement mail '{mail_ev.name}' à Zimbra (Matière introuvable ou date trop éloignée).")
+            except Exception as e:
+                logger.error(f"❌ Erreur de parsing de l'ICS du mail : {e}")
 
 def log_missing_codes(missing_codes):
     """Enregistre les codes matières inconnus dans un fichier log."""
@@ -506,9 +806,9 @@ def sync_to_google(events_payload_map, full_sync=False):
         elif new_data['end'].get('dateTime') != old_data.get('end', {}).get('dateTime', ''):
             needs_update = True
 
-        # S'assurer que les métadonnées V3.0 sont présentes
+        # S'assurer que les métadonnées V4.0 sont présentes
         old_props = old_data.get('extendedProperties', {}).get('private', {})
-        if old_props.get('version') != '3.0':
+        if old_props.get('version') != '4.0':
             needs_update = True
 
         if needs_update:
@@ -542,16 +842,36 @@ def main():
     parser = argparse.ArgumentParser(description='Unicaen EDT → Google Calendar Sync')
     parser.add_argument('--full', action='store_true',
                         help='Synchronise TOUS les événements (passés + futurs)')
+    parser.add_argument('--mail', action='store_true',
+                        help='Vérifie uniquement les nouveaux mails et annule si pas de mail (usage cron séparé)')
     args = parser.parse_args()
 
     if args.full:
         logger.info("🔁 Mode FULL : synchronisation de tous les événements (passés inclus)")
 
-    validate_config()
+    if args.mail:
+        logger.info("📩 Mode --mail activé : Vérification rapide IMAP...")
+        validate_config(check_imap=True)
+        if not check_new_imap_messages():
+            logger.info("💤 Aucun nouveau message IMAP. Synchronisation mail non-nécessaire.")
+            return
+    else:
+        validate_config(check_imap=False)
+
     cours_mapping = load_mapping()
     ics_text = download_ics()
+    
+    # 1. Parsing normal Zimbra
     events_payload_map, missing_codes = parse_events(ics_text, cours_mapping, full_sync=args.full)
     log_missing_codes(missing_codes)
+    
+    # 2. Vérification IMAP des éventuels changements
+    fetch_latest_ics_from_mail(cours_mapping, events_payload_map)
+    
+    # 3. Application des overrides trouvés
+    events_payload_map = apply_overrides(events_payload_map)
+    
+    # 4. Synchro finale
     sync_to_google(events_payload_map, full_sync=args.full)
     logger.info("🎉 Synchronisation terminée.")
 
