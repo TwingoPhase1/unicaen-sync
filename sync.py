@@ -142,7 +142,8 @@ def check_new_imap_messages():
             messages = server.search(['UID', f'{last_uid+1}:*']) if last_uid > 0 else server.search('ALL')
             messages = [uid for uid in messages if uid > last_uid]
             
-            # Maj de l'état (sans enregistrer le last_uid ici pour le laisser à fetch_latest_ics_from_mail)
+            
+            # Ne pas enregistrer last_uid ici, juste retourner s'il y en a.
             if messages:
                 return True
             return False
@@ -748,7 +749,8 @@ def fetch_latest_ics_from_mail(cours_mapping, events_payload_map, dry_run=False)
                 except Exception as inner_e:
                     logger.warning(f"⚠️ Impossible de parser le mail UID {msg_uid}: {inner_e}")
                 
-            # Sauvegarder
+            # L'enregistrement de l'état se fait désormais directement à la fin du traitement de la boucle `new_msgs`,
+            # Indépendamment du fait de sauvegarder les dérogations ou non (pour avancer la tête de lecture)
             if not dry_run:
                 save_overrides(overrides)
                 with open(MAIL_SYNC_STATE_FILE, 'w') as f:
