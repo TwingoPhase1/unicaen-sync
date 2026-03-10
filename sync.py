@@ -55,6 +55,7 @@ MAPPING_FILE = 'mapping.json'
 MISSING_LOG_FILE = 'missing_subjects.txt'
 OVERRIDES_FILE = '.overrides.json'
 MAIL_SYNC_STATE_FILE = '.mail_sync_state'
+DISCORD_ROLES_FILE = 'discord_roles.json'
 
 IMAP_SERVER = os.getenv("IMAP_SERVER")
 IMAP_USER = os.getenv("IMAP_USER")
@@ -164,6 +165,36 @@ def load_mapping():
         sys.exit(1)
 
 
+def load_discord_roles():
+    """Charge le dictionnaire de rôles Discord depuis discord_roles.json."""
+    if not os.path.exists(DISCORD_ROLES_FILE):
+        return {}
+    try:
+        with open(DISCORD_ROLES_FILE, 'r', encoding='utf-8') as f:
+            roles = json.load(f)
+        return {re.compile(k, re.IGNORECASE): v for k, v in roles.items()}
+    except Exception as e:
+        logger.warning(f"⚠️ Impossible de charger {DISCORD_ROLES_FILE}: {e}")
+        return {}
+
+
+def get_role_mentions(text, compiled_roles):
+    """Trouve les ID de rôles Discord correspondants au texte."""
+    if not text or not compiled_roles:
+        return ""
+    
+    mentions = set()
+    for regex, role_input in compiled_roles.items():
+        if regex.search(text):
+            if isinstance(role_input, list):
+                for role_id in role_input:
+                    mentions.add(f"<@&{role_id}>")
+            else:
+                mentions.add(f"<@&{role_input}>")
+            
+    return " ".join(mentions)
+
+
 def load_overrides():
     """Charge les dérogations locales issues des mails (nouveaux horaires, lieux)."""
     if not os.path.exists(OVERRIDES_FILE):
@@ -185,7 +216,7 @@ def save_overrides(overrides):
         logger.error(f"❌ Erreur de sauvegarde de {OVERRIDES_FILE}: {e}")
 
 
-def send_discord_notification(title, description, color=16711680):
+def send_discord_notification(title, description, color=16711680, content=None):
     """Envoie une notification Discord via Webhook si configuré."""
     if not DISCORD_WEBHOOK_URL:
         return
@@ -198,11 +229,45 @@ def send_discord_notification(title, description, color=16711680):
             "timestamp": datetime.datetime.now(UTC_TZ).isoformat()
         }]
     }
+    
+    if content:
+        payload["content"] = content
 
     try:
         requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
     except Exception as e:
         logger.warning(f"⚠️ Échec de l'envoi de la notification Discord : {e}")
+
+
+def test_discord_notifications():
+    """Envoie une série de notifications factices pour tester le rendu Discord."""
+    logger.info("🧪 Lancement du test des Webhooks Discord...")
+    
+    if not DISCORD_WEBHOOK_URL:
+        logger.error("❌ DISCORD_WEBHOOK_URL n'est pas défini dans le .env !")
+        return
+        
+    discord_roles = load_discord_roles()
+    
+    # Test 1: Changement d'horaire basique sans ping spécifique
+    logger.info("Test 1: Changement d'horaire standard")
+    desc_1 = "**Matière :** 🎤 CM Base de Données\n\n**🕒 Horaire modifié :**\n~~01/09 08:00 - 10:00~~\n➔ **01/09 10:00 - 12:00**"
+    ping_1 = get_role_mentions("CM Base de Données", discord_roles)
+    send_discord_notification("🔄 Modification d'Emploi du Temps", desc_1, color=16753920, content=ping_1)
+    
+    # Test 2: Changement de lieu avec ping TP
+    logger.info("Test 2: Changement de lieu (Cible TP 1.2)")
+    desc_2 = "**Matière :** 💻 TP1.2 Programmation Web\n\n**📍 Salle modifiée :**\n~~S3-343~~\n➔ **S3-049**"
+    ping_2 = get_role_mentions("TP 1.2 Programmation Web", discord_roles)
+    send_discord_notification("🔄 Modification d'Emploi du Temps", desc_2, color=16753920, content=ping_2)
+
+    # Test 3: Cours annulé
+    logger.info("Test 3: Cours annulé (Cible TD 1)")
+    desc_3 = "**Matière :** ✏️ TD 1 Mathématiques\n\n🗓️ Était prévu le : 05/09/2026 de 14:00 à 16:00"
+    ping_3 = get_role_mentions("TD 1 Mathématiques", discord_roles)
+    send_discord_notification("❌ Cours Annulé", desc_3, color=16711680, content=ping_3)
+    
+    logger.info("✅ Tests envoyés à Discord ! Vérifiez votre channel.")
 
 def download_ics():
     """Télécharge le fichier ICS depuis l'ENT avec retry automatique."""
@@ -641,6 +706,8 @@ def fetch_latest_ics_from_mail(cours_mapping, events_payload_map, dry_run=False)
             sorted_codes = sorted(cours_mapping.keys(), key=len, reverse=True)
             compiled_codes = {code: re.compile(rf'\b{re.escape(code)}\b', re.IGNORECASE) for code in sorted_codes}
             
+            discord_roles = load_discord_roles()
+            
             # Créer un cache O(1) (date, code_matiere) -> list[(z_id, z_event)]
             events_by_date_code = {}
             for z_id, z_event in events_payload_map.items():
@@ -665,8 +732,21 @@ def fetch_latest_ics_from_mail(cours_mapping, events_payload_map, dry_run=False)
                         
                     msg = email.message_from_bytes(raw_email)
                     
+                    # Extract subject for cancellation detection
+                    subject = ""
+                    if msg['Subject']:
+                        decoded_parts = email.header.decode_header(msg['Subject'])
+                        for part, encoding in decoded_parts:
+                            if isinstance(part, bytes):
+                                try:
+                                    subject += part.decode(encoding or 'utf-8')
+                                except Exception:
+                                    subject += part.decode('utf-8', errors='ignore')
+                            else:
+                                subject += part
+                                
                     # Chercher la pièce jointe
-                    process_mail_parts(msg, msg_uid, overrides, events_by_date_code, compiled_codes)
+                    process_mail_parts(msg, msg_uid, overrides, events_by_date_code, compiled_codes, discord_roles, subject)
                 except Exception as inner_e:
                     logger.warning(f"⚠️ Impossible de parser le mail UID {msg_uid}: {inner_e}")
                 
@@ -720,7 +800,7 @@ def find_matching_zimbra_event(mail_event, events_by_date_code, compiled_codes):
                 
     return None
 
-def process_mail_parts(msg, msg_uid, overrides, events_by_date_code, compiled_codes):
+def process_mail_parts(msg, msg_uid, overrides, events_by_date_code, compiled_codes, discord_roles, mail_subject=""):
     for part in msg.walk():
         if part.get_content_maintype() == 'multipart':
             continue
@@ -765,16 +845,14 @@ def process_mail_parts(msg, msg_uid, overrides, events_by_date_code, compiled_co
                         o_end = end_dt.isoformat()
                         o_loc = str(mail_ev.get('LOCATION', ''))
                         
-                        overrides[z_id] = {
-                            "start": o_start,
-                            "end": o_end,
-                            "location": o_loc,
-                            "uid_source": msg_uid
-                        }
-                        
                         # Notification Discord
                         try:
                             z_summary = "[Inconnu]"
+                            z_desc = ""
+                            z_loc = ""
+                            z_start_dt = None
+                            z_end_dt = None
+                            
                             mail_start_date = start_dt.date()
                             
                             # Find the matching code to get the summary
@@ -791,18 +869,76 @@ def process_mail_parts(msg, msg_uid, overrides, events_by_date_code, compiled_co
                                 for ev_id, stored_ev in events_by_date_code[(mail_start_date, matched_code)]:
                                     if ev_id == z_id:
                                         z_summary = stored_ev.get('summary', z_summary)
+                                        z_desc = stored_ev.get('description', '')
+                                        z_loc = stored_ev.get('location', '')
+                                        try:
+                                            z_start_dt = datetime.datetime.fromisoformat(stored_ev['start']['dateTime'])
+                                            z_end_dt = datetime.datetime.fromisoformat(stored_ev['end']['dateTime'])
+                                        except Exception:
+                                            pass
                                         break
+                                        
+                            role_mentions = get_role_mentions(search_zone + " " + z_summary + " " + z_desc, discord_roles)
                             
-                            discord_msg = (
-                                f"**Matière :** {z_summary}\n"
-                                f"**Nouvelle date :** {start_dt.astimezone(PARIS_TZ).strftime('%d/%m/%Y %H:%M')} ➔ {end_dt.astimezone(PARIS_TZ).strftime('%H:%M')}\n"
-                            )
-                            if o_loc:
-                                discord_msg += f"**Nouveau lieu :** {o_loc}"
+                            changes = []
+                            # Compare times
+                            time_changed = False
+                            if z_start_dt and z_end_dt:
+                                if z_start_dt.astimezone(UTC_TZ) != start_dt.astimezone(UTC_TZ) or z_end_dt.astimezone(UTC_TZ) != end_dt.astimezone(UTC_TZ):
+                                    time_changed = True
+                                    old_time = f"{z_start_dt.astimezone(PARIS_TZ).strftime('%d/%m %H:%M')} - {z_end_dt.astimezone(PARIS_TZ).strftime('%H:%M')}"
+                                    new_time = f"{start_dt.astimezone(PARIS_TZ).strftime('%d/%m %H:%M')} - {end_dt.astimezone(PARIS_TZ).strftime('%H:%M')}"
+                                    changes.append(f"**🕒 Horaire modifié :**\n~~{old_time}~~\n➔ **{new_time}**")
+                            
+                            # Compare location
+                            if o_loc and o_loc != z_loc:
+                                if z_loc:
+                                    changes.append(f"**📍 Salle modifiée :**\n~~{z_loc}~~\n➔ **{o_loc}**")
+                                else:
+                                    changes.append(f"**📍 Salle ajoutée :** {o_loc}")
+
+                            # If it's a cancellation "annulé" keyword
+                            search_zone_extended = search_zone + " " + mail_subject.upper()
+                            is_cancelled = "ANNULÉ" in search_zone_extended or "ANNULE" in search_zone_extended
+                            
+                            if is_cancelled:
+                                discord_title = "❌ Cours Annulé"
+                                discord_color = 16711680 # Red
+                                discord_desc = f"**Matière :** {z_summary}\n\n"
+                                if z_start_dt and z_end_dt:
+                                   discord_desc += f"🗓️ Était prévu le : {z_start_dt.astimezone(PARIS_TZ).strftime('%d/%m/%Y de %H:%M')} à {z_end_dt.astimezone(PARIS_TZ).strftime('%H:%M')}"
+                            else:
+                                discord_title = "🔄 Modification d'Emploi du Temps"
+                                discord_color = 16753920 # Orange
+                                discord_desc = f"**Matière :** {z_summary}\n\n"
                                 
-                            send_discord_notification("🚨 Modification d'Emploi du Temps", discord_msg, color=16753920) # Orange
+                                if changes:
+                                    discord_desc += "\n\n".join(changes)
+                                else:
+                                    # Fallback if no specific change detected but mail was sent
+                                    discord_desc += f"**Nouvelle date :** {start_dt.astimezone(PARIS_TZ).strftime('%d/%m/%Y %H:%M')} ➔ {end_dt.astimezone(PARIS_TZ).strftime('%H:%M')}\n"
+                                    if o_loc:
+                                        discord_desc += f"**Nouveau lieu :** {o_loc}"
+                                        
+                            # Only send discord notification if it wasn't already overridden with identical information
+                            already_overridden_same = False
+                            if z_id in overrides:
+                                existing_override = overrides[z_id]
+                                if existing_override['start'] == o_start and existing_override['end'] == o_end and existing_override['location'] == o_loc:
+                                    already_overridden_same = True
+                                    
+                            if not already_overridden_same:
+                                send_discord_notification(discord_title, discord_desc, color=discord_color, content=role_mentions)
+                                
                         except Exception as e:
                             logger.error(f"Erreur formattage discord : {e}")
+                            
+                        overrides[z_id] = {
+                            "start": o_start,
+                            "end": o_end,
+                            "location": o_loc,
+                            "uid_source": msg_uid
+                        }
                     else:
                         event_name = str(mail_ev.get('SUMMARY', ''))
                         logger.warning(f"⚠️ Impossible de lier l'événement mail '{event_name}' à Zimbra (Matière introuvable ou date trop éloignée).")
@@ -1041,7 +1177,13 @@ def main():
                         help='Vérifie uniquement les nouveaux mails et annule si pas de mail (usage cron séparé)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Exécute le script sans modifier Google Calendar ni les fichiers d\'état')
+    parser.add_argument('--test-discord', action='store_true',
+                        help='Envoie tous les types de messages Discord possibles pour tester le webhook et les rôles')
     args = parser.parse_args()
+
+    if args.test_discord:
+        test_discord_notifications()
+        return
 
     if args.full:
         logger.info("🔁 Mode FULL : synchronisation de tous les événements (passés inclus)")

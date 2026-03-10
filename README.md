@@ -23,7 +23,7 @@
 | 📝 Auto-Discovery | Codes matières inconnus loggés dans `missing_subjects.txt`. |
 | 🔁 Mode Full | `--full` pour resync tous les événements, passés inclus (ignore le jeton de sync rapide). |
 | 📧 Mail Sync Bypass | `--mail` Scrappe les modifications urgentes envoyées par la scolarité avec protection `UIDVALIDITY`. |
-| 🔔 Alerte Discord | (Optionnel) Reçois un ping sur Discord dès que la scolarité t'envoie un mail de modification d'emploi du temps. |
+| 🔔 Alerte Discord | Reçois un ping sur Discord (avec mention de rôle personnalisée via regex) lors d'un ajout de salle, changement d'horaire, ou d'annulation (détecte "Annulé" dans le `.ics` ET dans l'objet de l'e-mail). |
 | 🧪 Mode Dry-Run | `--dry-run` pour tester le script et voir les diffs sans rien modifier sur Google Calendar ni localement. |
 
 ## 🚀 Installation
@@ -93,6 +93,22 @@ Format riche avec emoji, couleur Google et coefficients par UE :
 
 </details>
 
+### 5. Pings Discord (discord_roles.json)
+
+Pour que la notification Discord mentionne des rôles spécifiques selon les cours (pratique pour notifier uniquement le groupe TD ou TP concerné), créez un fichier `discord_roles.json` à la racine :
+
+```json
+{
+  "TD\\s*1": "123456789012345678",
+  "TP\\s*[12]": "987654321098765432",
+  "CM": "555555555555555555"
+}
+```
+
+- La clé est une **Expression Régulière** (Regex) qui sera cherchée dans le titre et la description du cours modifié.
+- La valeur est l'**ID du rôle Discord** à ping.
+- S'il n'y a pas de fichier ou pas de correspondance, le message est quand même envoyé sans ping.
+
 ## 🐳 Usage Docker
 
 ```bash
@@ -110,6 +126,10 @@ docker run --rm --env-file .env unicaen-sync python sync.py --dry-run
 
 # Run (Vérification et réconciliation via Mail UNIQUEMENT)
 docker run --rm --env-file .env unicaen-sync python sync.py --mail
+
+# Run (Spécial: Tester le Webhook Discord)
+# Envoie 3 fausses alertes sur votre serveur Discord pour valider le webhook et les pings de rôles du discord_roles.json
+docker run --rm --env-file .env unicaen-sync python sync.py --test-discord
 ```
 
 ### Automatisation (Crontab optimisé)
@@ -130,6 +150,7 @@ Il est recommandé de lancer le script de base (`--mail`) fréquemment pour les 
 |---------|------|
 | `sync.py` | Script principal V5.0 |
 | `mapping.json` | Matières : emoji + couleur + coefficients |
+| `discord_roles.json` | (Optionnel) Mapping Regex → Discord Role ID |
 | `Dockerfile` | Image Docker (Python 3.11, TZ Paris) |
 | `requirements.txt` | Dépendances Python |
 | `credentials.json` | Clé Google (**non incluse**, à créer) |
