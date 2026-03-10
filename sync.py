@@ -142,10 +142,8 @@ def check_new_imap_messages():
             messages = server.search(['UID', f'{last_uid+1}:*']) if last_uid > 0 else server.search('ALL')
             messages = [uid for uid in messages if uid > last_uid]
             
-            # Maj de l'état même si on s'arrête là
+            # Maj de l'état (sans enregistrer le last_uid ici pour le laisser à fetch_latest_ics_from_mail)
             if messages:
-                with open(MAIL_SYNC_STATE_FILE, 'w') as f:
-                    json.dump({"uid_validity": uid_validity, "last_uid": max(messages)}, f)
                 return True
             return False
     except Exception as e:
@@ -1198,14 +1196,30 @@ def main():
         validate_config(check_imap=False)
 
     cours_mapping = load_mapping()
+    
+    # 2. Vérification IMAP des éventuels changements
+    # On le fait avant download_ics en mode --mail pour gagner du temps et de la bande passante si possible
+    old_overrides_hash = hash(json.dumps(load_overrides(), sort_keys=True))
+    
+    # On simule la structure vide pour fetch_latest_ics_from_mail si on n'a pas encore parsé l'ICS
+    dummy_events_payload_map = {}
+    
+    # Si on est en mode mail, on va d'abord télécharger l'ICS et voir si l'IMAP modifie les overrides
     ics_text = download_ics()
     
     # 1. Parsing normal Zimbra
     events_payload_map, missing_codes = parse_events(ics_text, cours_mapping, full_sync=args.full)
     log_missing_codes(missing_codes)
     
-    # 2. Vérification IMAP des éventuels changements
     fetch_latest_ics_from_mail(cours_mapping, events_payload_map, dry_run=args.dry_run)
+    
+    new_overrides = load_overrides()
+    new_overrides_hash = hash(json.dumps(new_overrides, sort_keys=True))
+    
+    if args.mail and old_overrides_hash == new_overrides_hash and not new_overrides:
+        # Aucun nouvel override n'a été appliqué, on peut s'arrêter car le mode --mail n'a rien vu d'utile
+        logger.info("💤 Aucun changement n'a été détecté dans les mails. Bypass de la synchronisation.")
+        return
     
     # 3. Application des overrides trouvés
     events_payload_map = apply_overrides(events_payload_map)
