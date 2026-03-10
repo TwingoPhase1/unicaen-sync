@@ -1,7 +1,9 @@
 .env
 *.json
+credentials.json
 .overrides.json
 .mail_sync_state
+.google_sync_store.json
 missing_subjects.txt
 __pycache__/
 *.log

@@ -1,4 +1,4 @@
-# 📅 Unicaen EDT Sync v4.0
+# 📅 Unicaen EDT Sync v5.0
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](https://www.docker.com/)
@@ -17,12 +17,14 @@
 | 📊 Coefficients | Affichés dans la description avec le détail par UE et le total. |
 | 🚨 Détection Examens | Préfixe `🚨 Examen` + couleur rouge automatique (DS, Partiels, Évaluations). |
 | ⏰ Smart Alarms | Tag `🔔 Premier cours de la journée` pour les applications de réveil. |
-| ⚡ Sync Différentielle | Hash MD5 stable par événement — ne touche que ce qui a changé. |
+| ⚡ Sync Rapide API | Utilisation de `SyncTokens` Google pour des requêtes delta extrêmement véloces. |
 | 🛡️ Safe Delete | Métadonnées privées (`extendedProperties`) : le bot ne supprime jamais vos événements personnels. |
+| 🔄 Support RRULE | Rendu complet et aplatissement des événements récurrents (`icalendar`). |
 | 📝 Auto-Discovery | Codes matières inconnus loggés dans `missing_subjects.txt`. |
-| 🔁 Mode Full | `--full` pour resync tous les événements, passés inclus. |
-| 📧 Mail Sync Bypass | `--mail` Scrappe les modifications urgentes (ICS) envoyées par la scolarité et update l'agenda (+ Bypass rapide optimisé si aucun nouveau mail). |
+| 🔁 Mode Full | `--full` pour resync tous les événements, passés inclus (ignore le jeton de sync rapide). |
+| 📧 Mail Sync Bypass | `--mail` Scrappe les modifications urgentes envoyées par la scolarité avec protection `UIDVALIDITY`. |
 | 🔔 Alerte Discord | (Optionnel) Reçois un ping sur Discord dès que la scolarité t'envoie un mail de modification d'emploi du temps. |
+| 🧪 Mode Dry-Run | `--dry-run` pour tester le script et voir les diffs sans rien modifier sur Google Calendar ni localement. |
 
 ## 🚀 Installation
 
@@ -97,11 +99,14 @@ Format riche avec emoji, couleur Google et coefficients par UE :
 # Build
 docker build -t unicaen-sync .
 
-# Run (événements futurs uniquement)
+# Run (événements futurs uniquement, avec SyncTokens rapides)
 docker run --rm --env-file .env unicaen-sync
 
 # Run (TOUS les événements, passés inclus)
 docker run --rm --env-file .env unicaen-sync python sync.py --full
+
+# Run (Test sans rien modifier - Dry-Run)
+docker run --rm --env-file .env unicaen-sync python sync.py --dry-run
 
 # Run (Vérification et réconciliation via Mail UNIQUEMENT)
 docker run --rm --env-file .env unicaen-sync python sync.py --mail
@@ -123,7 +128,7 @@ Il est recommandé de lancer le script de base (`--mail`) fréquemment pour les 
 
 | Fichier | Rôle |
 |---------|------|
-| `sync.py` | Script principal V4.0 |
+| `sync.py` | Script principal V5.0 |
 | `mapping.json` | Matières : emoji + couleur + coefficients |
 | `Dockerfile` | Image Docker (Python 3.11, TZ Paris) |
 | `requirements.txt` | Dépendances Python |

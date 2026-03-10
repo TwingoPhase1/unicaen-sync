@@ -1,7 +1,8 @@
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from ics import Calendar
+import icalendar
+import recurring_ical_events
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import datetime
@@ -13,9 +14,12 @@ import json
 import logging
 import argparse
 import email
+import ssl
 from email.header import decode_header
 from imapclient import IMAPClient
 from zoneinfo import ZoneInfo
+
+__version__ = "5.0.0"
 
 # --- Optionnel : charger .env en local ---
 try:
@@ -78,6 +82,32 @@ COLOR_DEFAULT = "9"    # Myrtille (bleu)
 #  FONCTIONS UTILITAIRES
 # =============================================================================
 
+def normalize_str(s):
+    """Normalise une chaîne pour comparaison stable (retours chariot, espaces)."""
+    return s.replace('\r\n', '\n').strip() if s else ""
+
+
+def _imap_connect():
+    """Crée une connexion IMAP avec SSL désactivé (certificat auto-signé Unicaen)."""
+    # NOTE: La vérification SSL est désactivée volontairement car le serveur
+    # Zimbra/ZCS d'Unicaen utilise un certificat auto-signé.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return IMAPClient(IMAP_SERVER, use_uid=True, ssl=True, ssl_context=ctx)
+
+
+def _read_last_uid():
+    """Lit le dernier UID et UIDVALIDITY IMAP traités depuis le fichier d'état."""
+    if os.path.exists(MAIL_SYNC_STATE_FILE):
+        try:
+            with open(MAIL_SYNC_STATE_FILE, 'r') as f:
+                data = json.load(f)
+                return data.get("uid_validity", 0), data.get("last_uid", 0)
+        except (ValueError, IOError):
+            return 0, 0
+    return 0, 0
+
 def validate_config(check_imap=False):
     """Vérifie que toutes les variables d'environnement et fichiers requis sont présents."""
     if not all([ICS_URL, USERNAME, PASSWORD, CALENDAR_ID]):
@@ -95,29 +125,26 @@ def validate_config(check_imap=False):
 
 def check_new_imap_messages():
     """Vérifie s'il y a de nouveaux mails sans télécharger le calendrier entier."""
-    last_uid = 0
-    if os.path.exists(MAIL_SYNC_STATE_FILE):
-        try:
-            with open(MAIL_SYNC_STATE_FILE, 'r') as f:
-                last_uid = int(f.read().strip())
-        except:
-            last_uid = 0
+    uid_validity, last_uid = _read_last_uid()
 
-    import ssl
     try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with IMAPClient(IMAP_SERVER, use_uid=True, ssl=True, ssl_context=ctx) as server:
+        with _imap_connect() as server:
             server.login(IMAP_USER, IMAP_PASS)
-            server.select_folder('INBOX')
+            folder_info = server.select_folder('INBOX')
+            current_validity = folder_info.get(b'UIDVALIDITY', 0)
+            
+            # Reset si changement de serveur/dossier
+            if current_validity != uid_validity:
+                uid_validity = current_validity
+                last_uid = 0
+            
             messages = server.search(['UID', f'{last_uid+1}:*']) if last_uid > 0 else server.search('ALL')
             messages = [uid for uid in messages if uid > last_uid]
             
             # Maj de l'état même si on s'arrête là
             if messages:
                 with open(MAIL_SYNC_STATE_FILE, 'w') as f:
-                    f.write(str(max(messages)))
+                    json.dump({"uid_validity": uid_validity, "last_uid": max(messages)}, f)
                 return True
             return False
     except Exception as e:
@@ -339,7 +366,6 @@ def classify_event(event, cours_mapping, compiled_codes):
     # --- Détection du type (CM/TD/TP/Examen) avec regex word-boundary ---
     emoji_type = "📅"
     type_label = ""
-    desc_upper = (event.description or "").upper()
 
     if re.search(r'\bEXAM\b|\bEVALUATION\b|\bPARTIEL\b|\bDS\b|\bEXAMENS?\b', search_zone):
         emoji_type = "🚨"
@@ -359,7 +385,7 @@ def classify_event(event, cours_mapping, compiled_codes):
             elif typ in ["CM", "AMPHI"]: emoji_type, type_label = "🎤", "CM"
             elif typ == "SOUTIEN": emoji_type, type_label = "🆘", "Soutien"
         else:
-            match_desc = re.search(r'\b(TP|TD|CM)\b', desc_upper)
+            match_desc = re.search(r'\b(TP|TD|CM)\b', search_zone)
             if match_desc:
                 typ = match_desc.group(1)
                 if typ == "TP": emoji_type, type_label = "💻", "TP"
@@ -387,9 +413,9 @@ def generate_stable_id(event_uid):
 
 def parse_events(ics_text, cours_mapping, full_sync=False):
     """Parse le fichier ICS et retourne les événements transformés."""
-    logger.info("⚙️ Analyse V4.0...")
+    logger.info("⚙️ Analyse V5.0...")
     try:
-        cal = Calendar(ics_text)
+        cal = icalendar.Calendar.from_ical(ics_text)
     except Exception as e:
         logger.critical(f"❌ ERREUR LECTURE ICS : {e}")
         sys.exit(1)
@@ -403,19 +429,55 @@ def parse_events(ics_text, cours_mapping, full_sync=False):
     events_payload_map = {}
     seen_days = set()
     missing_codes = set()
+    
+    # Dérouler les RRULE sur une période de 1 an dans le passé et 3 ans dans le futur
+    events = recurring_ical_events.of(cal).between(
+        now_aware - datetime.timedelta(days=365),
+        now_aware + datetime.timedelta(days=365 * 3)
+    )
 
-    sorted_events = sorted(cal.events, key=lambda x: x.begin)
+    # Sort events by start date
+    events.sort(key=lambda x: x.get('dtstart').dt)
 
-    for event in sorted_events:
-        if not event.name:
+    class _EventAdapter:
+        """Adaptateur léger pour passer les données icalendar à classify_event."""
+        __slots__ = ('name', 'description', 'location')
+        def __init__(self, name, description, location):
+            self.name = name
+            self.description = description
+            self.location = location
+
+    for event in events:
+        event_name = str(event.get('SUMMARY', ''))
+        event_desc = str(event.get('DESCRIPTION', ''))
+        event_location = str(event.get('LOCATION', ''))
+        
+        dummy_event = _EventAdapter(event_name, event_desc, event_location)
+
+        if not dummy_event.name:
             continue
 
-        if not SHOW_HACK_CAMPUS and "hack ecampus" in event.name.lower():
+        if not SHOW_HACK_CAMPUS and "hack ecampus" in dummy_event.name.lower():
             continue
 
         try:
-            event_start = event.begin.to('utc').datetime
-            event_end = event.end.to('utc').datetime
+            # Handle datetime or date objects from icalendar
+            start_dt = event.get('DTSTART').dt
+            end_dt = event.get('DTEND').dt
+            
+            if isinstance(start_dt, datetime.date) and not isinstance(start_dt, datetime.datetime):
+                # All day event, convert to datetime with UTC
+                start_dt = datetime.datetime.combine(start_dt, datetime.time.min).replace(tzinfo=UTC_TZ)
+                end_dt = datetime.datetime.combine(end_dt, datetime.time.min).replace(tzinfo=UTC_TZ)
+            elif start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=UTC_TZ)
+                end_dt = end_dt.replace(tzinfo=UTC_TZ)
+            else:
+                start_dt = start_dt.astimezone(UTC_TZ)
+                end_dt = end_dt.astimezone(UTC_TZ)
+                
+            event_start = start_dt
+            event_end = end_dt
         except Exception as e:
             logger.warning(f"⚠️ Erreur de date sur un événement : {e}")
             continue
@@ -434,23 +496,33 @@ def parse_events(ics_text, cours_mapping, full_sync=False):
 
         # Classification
         final_summary, color_id, matched_code, cours_data, missing_code = classify_event(
-            event, cours_mapping, compiled_codes
+            dummy_event, cours_mapping, compiled_codes
         )
         if missing_code:
             missing_codes.add(missing_code)
 
-        # --- ID STABLE basé sur l'UID ICS ---
-        event_uid = event.uid or f"{event.name}_{event_start.isoformat()}"
-        unique_id = generate_stable_id(event_uid)
+        # --- ID STABLE basé sur l'UID ICS + RECURRENCE-ID s'il y en a un ---
+        try:
+            uid_str = str(event.get('UID', ''))
+        except Exception:
+            uid_str = f"{dummy_event.name}_{event_start.isoformat()}"
+            
+        recurrence_id = event.get('RECURRENCE-ID')
+        if recurrence_id:
+            uid_str += f"_{recurrence_id.dt.isoformat()}"
+            
+        # On ajoute quand même l'event_start dans le subistut UID pour éviter les collisions
+        event_uid = uid_str or f"{dummy_event.name}_{event_start.isoformat()}"
+        unique_id = generate_stable_id(event_uid + event_start.isoformat())
 
         # --- ALARME & DESCRIPTION ENRICHIE ---
-        desc = enrich_description(event.description, cours_data, matched_code, is_first_of_day)
+        desc = enrich_description(dummy_event.description, cours_data, matched_code, is_first_of_day)
 
         # Build original data payload
         event_body = {
             'id': unique_id,
             'summary': final_summary,
-            'location': event.location or "",
+            'location': dummy_event.location or "",
             'description': desc,
             'colorId': color_id,
             'start': {'dateTime': event_start.isoformat(), 'timeZone': 'UTC'},
@@ -459,7 +531,8 @@ def parse_events(ics_text, cours_mapping, full_sync=False):
             'extendedProperties': {
                 'private': {
                     'createdBy': 'unicaen-sync-bot',
-                    'version': '4.0'
+                    'version': '5.0',
+                    'matchedCode': matched_code or ''
                 }
             }
         }
@@ -525,32 +598,31 @@ def apply_overrides(events_payload_map):
     return events_payload_map
 
 
-def fetch_latest_ics_from_mail(cours_mapping, events_payload_map):
+def fetch_latest_ics_from_mail(cours_mapping, events_payload_map, dry_run=False):
     """
     Se connecte en IMAP, cherche les nouveaux mails avec fichiers .ics (ou .vcs).
     Enregistre les dérogations si pertinentes.
     """
+    if dry_run:
+        logger.info("🧪 [DRY RUN] Recherche de mails simulée.")
+        
     if not IMAP_SERVER or not IMAP_USER or not IMAP_PASS:
         logger.info("ℹ️ Identifiants IMAP non configurés. Ignorance de la recherche de mails.")
         return
         
-    last_uid = 0
-    if os.path.exists(MAIL_SYNC_STATE_FILE):
-        try:
-            with open(MAIL_SYNC_STATE_FILE, 'r') as f:
-                last_uid = int(f.read().strip())
-        except:
-            last_uid = 0
+    uid_validity, last_uid = _read_last_uid()
 
-    import ssl
     logger.info("📧 Connexion à la boîte mail...")
     try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with IMAPClient(IMAP_SERVER, use_uid=True, ssl=True, ssl_context=ctx) as server:
+        with _imap_connect() as server:
             server.login(IMAP_USER, IMAP_PASS)
-            server.select_folder('INBOX')
+            folder_info = server.select_folder('INBOX')
+            current_validity = folder_info.get(b'UIDVALIDITY', 0)
+            
+            # Reset si changement de serveur/dossier
+            if current_validity != uid_validity:
+                uid_validity = current_validity
+                last_uid = 0
 
             messages = server.search(['UID', f'{last_uid+1}:*']) if last_uid > 0 else server.search('ALL')
             messages = [uid for uid in messages if uid > last_uid]
@@ -569,13 +641,16 @@ def fetch_latest_ics_from_mail(cours_mapping, events_payload_map):
             sorted_codes = sorted(cours_mapping.keys(), key=len, reverse=True)
             compiled_codes = {code: re.compile(rf'\b{re.escape(code)}\b', re.IGNORECASE) for code in sorted_codes}
             
-            # Créer un cache O(1) pour les dates des événements Zimbra (pour l'algorithme find_matching_zimbra_event)
-            events_by_date = {}
+            # Créer un cache O(1) (date, code_matiere) -> list[(z_id, z_event)]
+            events_by_date_code = {}
             for z_id, z_event in events_payload_map.items():
                 z_start = datetime.datetime.fromisoformat(z_event['start']['dateTime']).date()
-                if z_start not in events_by_date:
-                    events_by_date[z_start] = []
-                events_by_date[z_start].append((z_id, z_event))
+                matched_code = z_event.get('extendedProperties', {}).get('private', {}).get('matchedCode', '')
+                if matched_code:
+                    key = (z_start, matched_code)
+                    if key not in events_by_date_code:
+                        events_by_date_code[key] = []
+                    events_by_date_code[key].append((z_id, z_event))
             
             for msg_uid in new_msgs:
                 new_uid_state = max(new_uid_state, msg_uid)
@@ -591,14 +666,17 @@ def fetch_latest_ics_from_mail(cours_mapping, events_payload_map):
                     msg = email.message_from_bytes(raw_email)
                     
                     # Chercher la pièce jointe
-                    process_mail_parts(msg, msg_uid, overrides, events_by_date, compiled_codes)
+                    process_mail_parts(msg, msg_uid, overrides, events_by_date_code, compiled_codes)
                 except Exception as inner_e:
                     logger.warning(f"⚠️ Impossible de parser le mail UID {msg_uid}: {inner_e}")
                 
             # Sauvegarder
-            save_overrides(overrides)
-            with open(MAIL_SYNC_STATE_FILE, 'w') as f:
-                f.write(str(new_uid_state))
+            if not dry_run:
+                save_overrides(overrides)
+                with open(MAIL_SYNC_STATE_FILE, 'w') as f:
+                    json.dump({"uid_validity": uid_validity, "last_uid": new_uid_state}, f)
+            else:
+                logger.info("🧪 [DRY RUN] Sauvegarde de l'état mail ignorée.")
             
             logger.info("✅ Vérification des mails terminée.")
 
@@ -606,13 +684,16 @@ def fetch_latest_ics_from_mail(cours_mapping, events_payload_map):
         logger.error(f"❌ Erreur IMAP : {e}")
 
 
-def find_matching_zimbra_event(mail_event, events_by_date, compiled_codes):
+def find_matching_zimbra_event(mail_event, events_by_date_code, compiled_codes):
     """
     Tente de lier l'événement mail à un événement Zimbra existant via la matière
     et la proximité calendaire (même jour).
+    L'ordre d'analyse O(1) permet d'accélérer considérablement le processus.
     """
-    original_title = mail_event.name.strip().upper()
-    search_zone = (mail_event.name + " " + (mail_event.description or "")).upper()
+    event_name = str(mail_event.get('SUMMARY', ''))
+    event_desc = str(mail_event.get('DESCRIPTION', ''))
+    original_title = event_name.strip().upper()
+    search_zone = (event_name + " " + event_desc).upper()
     
     matched_code = None
     for code, regex in compiled_codes.items():
@@ -624,20 +705,22 @@ def find_matching_zimbra_event(mail_event, events_by_date, compiled_codes):
         return None
         
     try:
-        mail_start = mail_event.begin.to('utc').datetime.date()
-    except:
+        start_dt = mail_event.get('DTSTART').dt
+        if isinstance(start_dt, datetime.datetime):
+            mail_start = start_dt.date()
+        else:
+            mail_start = start_dt
+    except Exception:
         return None
         
     # Match via the date index O(1)
-    if mail_start in events_by_date:
-        for z_id, z_event in events_by_date[mail_start]:
-            z_search_zone = (z_event['summary'] + " " + z_event['description']).upper()
-            if re.search(rf'\b{re.escape(matched_code)}\b', z_search_zone, re.IGNORECASE):
-                return z_id
+    key = (mail_start, matched_code)
+    if key in events_by_date_code:
+        return events_by_date_code[key][0][0]
                 
     return None
 
-def process_mail_parts(msg, msg_uid, overrides, events_by_date, compiled_codes):
+def process_mail_parts(msg, msg_uid, overrides, events_by_date_code, compiled_codes):
     for part in msg.walk():
         if part.get_content_maintype() == 'multipart':
             continue
@@ -652,14 +735,35 @@ def process_mail_parts(msg, msg_uid, overrides, events_by_date, compiled_codes):
             logger.info(f"📎 Trouvé fichier de calendrier : {filename}")
             try:
                 content = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                cal = Calendar(content)
-                for mail_ev in cal.events:
-                    z_id = find_matching_zimbra_event(mail_ev, events_by_date, compiled_codes)
+                cal = icalendar.Calendar.from_ical(content)
+                
+                # Fetching events resolving recurrences just in case mail is a recurring event
+                events = recurring_ical_events.of(cal).between(
+                    datetime.datetime.now(UTC_TZ) - datetime.timedelta(days=7),
+                    datetime.datetime.now(UTC_TZ) + datetime.timedelta(days=365)
+                )
+                
+                for mail_ev in events:
+                    z_id = find_matching_zimbra_event(mail_ev, events_by_date_code, compiled_codes)
                     if z_id:
                         logger.info(f"🔗 Liaison réussie : Le mail corrige l'événement Zimbra {z_id}")
-                        o_start = mail_ev.begin.to('utc').datetime.isoformat()
-                        o_end = mail_ev.end.to('utc').datetime.isoformat()
-                        o_loc = mail_ev.location or ""
+                        
+                        start_dt = mail_ev.get('DTSTART').dt
+                        end_dt = mail_ev.get('DTEND').dt
+                        
+                        if isinstance(start_dt, datetime.date) and not isinstance(start_dt, datetime.datetime):
+                            start_dt = datetime.datetime.combine(start_dt, datetime.time.min).replace(tzinfo=UTC_TZ)
+                            end_dt = datetime.datetime.combine(end_dt, datetime.time.min).replace(tzinfo=UTC_TZ)
+                        elif start_dt.tzinfo is None:
+                            start_dt = start_dt.replace(tzinfo=UTC_TZ)
+                            end_dt = end_dt.replace(tzinfo=UTC_TZ)
+                        else:
+                            start_dt = start_dt.astimezone(UTC_TZ)
+                            end_dt = end_dt.astimezone(UTC_TZ)
+                            
+                        o_start = start_dt.isoformat()
+                        o_end = end_dt.isoformat()
+                        o_loc = str(mail_ev.get('LOCATION', ''))
                         
                         overrides[z_id] = {
                             "start": o_start,
@@ -671,14 +775,27 @@ def process_mail_parts(msg, msg_uid, overrides, events_by_date, compiled_codes):
                         # Notification Discord
                         try:
                             z_summary = "[Inconnu]"
-                            for _, stored_ev in events_by_date.get(mail_ev.begin.to('utc').datetime.date(), []):
-                                if _ == z_id:
-                                    z_summary = stored_ev.get('summary', z_summary)
+                            mail_start_date = start_dt.date()
+                            
+                            # Find the matching code to get the summary
+                            event_name = str(mail_ev.get('SUMMARY', ''))
+                            event_desc = str(mail_ev.get('DESCRIPTION', ''))
+                            search_zone = (event_name + " " + event_desc).upper()
+                            matched_code = None
+                            for code, regex in compiled_codes.items():
+                                if regex.search(search_zone):
+                                    matched_code = code
                                     break
+                                    
+                            if matched_code and (mail_start_date, matched_code) in events_by_date_code:
+                                for ev_id, stored_ev in events_by_date_code[(mail_start_date, matched_code)]:
+                                    if ev_id == z_id:
+                                        z_summary = stored_ev.get('summary', z_summary)
+                                        break
                             
                             discord_msg = (
                                 f"**Matière :** {z_summary}\n"
-                                f"**Nouvelle date :** {mail_ev.begin.to('utc').datetime.astimezone(PARIS_TZ).strftime('%d/%m/%Y %H:%M')} ➔ {mail_ev.end.to('utc').datetime.astimezone(PARIS_TZ).strftime('%H:%M')}\n"
+                                f"**Nouvelle date :** {start_dt.astimezone(PARIS_TZ).strftime('%d/%m/%Y %H:%M')} ➔ {end_dt.astimezone(PARIS_TZ).strftime('%H:%M')}\n"
                             )
                             if o_loc:
                                 discord_msg += f"**Nouveau lieu :** {o_loc}"
@@ -687,7 +804,8 @@ def process_mail_parts(msg, msg_uid, overrides, events_by_date, compiled_codes):
                         except Exception as e:
                             logger.error(f"Erreur formattage discord : {e}")
                     else:
-                        logger.warning(f"⚠️ Impossible de lier l'événement mail '{mail_ev.name}' à Zimbra (Matière introuvable ou date trop éloignée).")
+                        event_name = str(mail_ev.get('SUMMARY', ''))
+                        logger.warning(f"⚠️ Impossible de lier l'événement mail '{event_name}' à Zimbra (Matière introuvable ou date trop éloignée).")
             except Exception as e:
                 logger.error(f"❌ Erreur de parsing de l'ICS du mail : {e}")
 
@@ -753,8 +871,11 @@ def should_delete(ev_id, google_events_map):
     return False
 
 
-def sync_to_google(events_payload_map, full_sync=False):
+def sync_to_google(events_payload_map, full_sync=False, dry_run=False):
     """Synchronise les événements transformés avec Google Calendar."""
+    if dry_run:
+        logger.info("🧪 [DRY RUN] Synchronisation Google Calendar simulée.")
+        
     creds = service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE, scopes=['https://www.googleapis.com/auth/calendar']
     )
@@ -762,36 +883,76 @@ def sync_to_google(events_payload_map, full_sync=False):
 
     logger.info("🔄 Comparaison avec l'agenda Google existant...")
 
-    # Récupérer les événements Google existants
-    google_events_map = {}
-    page_token = None
+    STORE_FILE = '.google_sync_store.json'
+    local_store = {"sync_token": None, "events": {}}
+    
+    if os.path.exists(STORE_FILE) and not full_sync:
+        try:
+            with open(STORE_FILE, 'r') as f:
+                local_store = json.load(f)
+        except Exception:
+            pass
+
+    google_events_map = local_store.get("events", {})
+    sync_token = local_store.get("sync_token")
+    
     list_params = {
         'calendarId': CALENDAR_ID,
-        'singleEvents': True,
-        'privateExtendedProperty': 'createdBy=unicaen-sync-bot',
         'maxResults': 2500,
-        'timeZone': 'UTC',
     }
-    if not full_sync:
-        now_str = datetime.datetime.now(UTC_TZ).isoformat().replace("+00:00", "Z")
-        list_params['timeMin'] = now_str
-
-    try:
+    
+    # Mode Delta (Sync Token) ou Mode Initial/Full
+    if sync_token and not full_sync:
+        list_params['syncToken'] = sync_token
+    else:
+        list_params['singleEvents'] = True
+        list_params['privateExtendedProperty'] = 'createdBy=unicaen-sync-bot'
+        list_params['timeZone'] = 'UTC'
+        if not full_sync:
+            now_str = datetime.datetime.now(UTC_TZ).isoformat().replace("+00:00", "Z")
+            list_params['timeMin'] = now_str
+            
+    def fetch_google_events(params):
+        page_token = None
         while True:
             if page_token:
-                list_params['pageToken'] = page_token
-            events_result = service.events().list(**list_params).execute()
+                params['pageToken'] = page_token
+            result = service.events().list(**params).execute()
 
-            for item in events_result.get('items', []):
-                if 'id' in item:
-                    google_events_map[item['id']] = item
+            for item in result.get('items', []):
+                if item.get('status') == 'cancelled':
+                    google_events_map.pop(item['id'], None)
+                elif 'id' in item:
+                    # Ignore events not created by us if we pull everything (syncToken doesn't filter by extendedProperty!)
+                    props = item.get('extendedProperties', {}).get('private', {})
+                    if props.get('createdBy') == 'unicaen-sync-bot' or re.match(r'^(cal)?[a-f0-9]{32}$', item['id']):
+                        google_events_map[item['id']] = item
 
-            page_token = events_result.get('nextPageToken')
+            page_token = result.get('nextPageToken')
             if not page_token:
+                next_sync_token = result.get('nextSyncToken')
+                if next_sync_token:
+                    local_store['sync_token'] = next_sync_token
                 break
+
+    try:
+        fetch_google_events(list_params)
     except Exception as e:
-        logger.critical(f"❌ ERREUR API GOOGLE : {e}")
-        sys.exit(1)
+        if '410' in str(e):
+            logger.warning("🔄 Sync token expiré. Re-synchronisation complète...")
+            list_params.pop('syncToken', None)
+            list_params['singleEvents'] = True
+            list_params['privateExtendedProperty'] = 'createdBy=unicaen-sync-bot'
+            list_params['timeZone'] = 'UTC'
+            if not full_sync:
+                now_str = datetime.datetime.now(UTC_TZ).isoformat().replace("+00:00", "Z")
+                list_params['timeMin'] = now_str
+            local_store['events'] = {}
+            google_events_map = local_store['events']
+            fetch_google_events(list_params)
+        else:
+            logger.critical(f"❌ ERREUR API GOOGLE : {e}")
+            sys.exit(1)
 
     # --- Différentiel ---
     ics_ids = set(events_payload_map.keys())
@@ -805,9 +966,6 @@ def sync_to_google(events_payload_map, full_sync=False):
     for eid in (google_ids & ics_ids):
         new_data = events_payload_map[eid]
         old_data = google_events_map[eid]
-
-        def normalize_str(s):
-            return s.replace('\r\n', '\n').strip() if s else ""
 
         needs_update = False
         if normalize_str(new_data['summary']) != normalize_str(old_data.get('summary', '')):
@@ -824,10 +982,10 @@ def sync_to_google(events_payload_map, full_sync=False):
         elif normalize_dt(new_data['end'].get('dateTime')) != normalize_dt(old_data.get('end', {}).get('dateTime', '')):
             needs_update = True
 
-        # S'assurer que les métadonnées V4.0 sont présentes
-        # Si on n'a pas old_props mais qu'on a le event, par défaut on met update pour injecter la V4
+        # S'assurer que les métadonnées V5.0 sont présentes
+        # Si on n'a pas old_props mais qu'on a le event, par défaut on met update pour injecter la V5
         old_props = old_data.get('extendedProperties', {}).get('private', {})
-        if old_props.get('version') != '4.0':
+        if old_props.get('version') != '5.0':
             needs_update = True
 
         if needs_update:
@@ -848,9 +1006,27 @@ def sync_to_google(events_payload_map, full_sync=False):
 
     if batch_requests:
         logger.info(f"🚀 Envoi de {len(batch_requests)} opérations...")
-        execute_batch(service, batch_requests)
+        if not dry_run:
+            execute_batch(service, batch_requests)
+        else:
+            logger.info("🧪 [DRY RUN] Opérations API Google ignorées.")
     else:
         logger.info("💤 Tout est déjà à jour.")
+        
+    if dry_run:
+        return
+        
+    # Mettre à jour les données dans google_events_map localement et sauvegarder
+    for ev_id in to_delete:
+        local_store['events'].pop(ev_id, None)
+    for ev_id in to_insert | to_update:
+        local_store['events'][ev_id] = events_payload_map[ev_id]
+        
+    try:
+        with open(STORE_FILE, 'w') as f:
+            json.dump(local_store, f)
+    except Exception as e:
+        logger.error(f"⚠️ Erreur lors de la sauvegarde du cache Google : {e}")
 
 
 # =============================================================================
@@ -863,6 +1039,8 @@ def main():
                         help='Synchronise TOUS les événements (passés + futurs)')
     parser.add_argument('--mail', action='store_true',
                         help='Vérifie uniquement les nouveaux mails et annule si pas de mail (usage cron séparé)')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Exécute le script sans modifier Google Calendar ni les fichiers d\'état')
     args = parser.parse_args()
 
     if args.full:
@@ -885,13 +1063,13 @@ def main():
     log_missing_codes(missing_codes)
     
     # 2. Vérification IMAP des éventuels changements
-    fetch_latest_ics_from_mail(cours_mapping, events_payload_map)
+    fetch_latest_ics_from_mail(cours_mapping, events_payload_map, dry_run=args.dry_run)
     
     # 3. Application des overrides trouvés
     events_payload_map = apply_overrides(events_payload_map)
     
     # 4. Synchro finale
-    sync_to_google(events_payload_map, full_sync=args.full)
+    sync_to_google(events_payload_map, full_sync=args.full, dry_run=args.dry_run)
     logger.info("🎉 Synchronisation terminée.")
 
 
