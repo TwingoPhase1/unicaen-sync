@@ -15,7 +15,7 @@ import logging
 import argparse
 import email
 import ssl
-from email.header import decode_header
+from email.header import decode_header  # Used via email.header.decode_header
 from imapclient import IMAPClient
 from zoneinfo import ZoneInfo
 
@@ -546,17 +546,17 @@ def parse_events(ics_text, cours_mapping, full_sync=False):
             logger.warning(f"⚠️ Erreur de date sur un événement : {e}")
             continue
 
-        # Calculer le jour pour pouvoir attribuer le flag 'premier cours' avant filtrage
+        # On garde si la FIN est dans le futur (sauf en mode --full)
+        if not full_sync and event_end <= now_aware:
+            continue
+
+        # Calculer le jour APRÈS le filtre futur pour que le flag soit correct
         event_start_paris = event_start.replace(tzinfo=UTC_TZ).astimezone(PARIS_TZ)
         day_key = event_start_paris.strftime('%Y-%m-%d')
 
         is_first_of_day = day_key not in seen_days
         if is_first_of_day:
             seen_days.add(day_key)
-
-        # On garde si la FIN est dans le futur (sauf en mode --full)
-        if not full_sync and event_end <= now_aware:
-            continue
 
         # Classification
         final_summary, color_id, matched_code, cours_data, missing_code = classify_event(
@@ -611,15 +611,25 @@ def apply_overrides(events_payload_map):
     Vérifie les dérogations :
     Si Zimbra est mis à jour -> on supprime la dérogation.
     Si Zimbra n'est pas encore à jour -> on applique la dérogation sur events_payload_map.
+    Nettoie les overrides orphelins (événements disparus de l'ICS depuis > 7 jours).
     """
     overrides = load_overrides()
     if not overrides:
         return events_payload_map
 
     overrides_to_remove = set()
+    now = datetime.datetime.now(UTC_TZ)
     
     for zimbra_id, override_data in overrides.items():
         if zimbra_id not in events_payload_map:
+            # Nettoyage des overrides orphelins : si la date est passée depuis > 7 jours, on supprime
+            try:
+                override_end = datetime.datetime.fromisoformat(override_data['end'])
+                if override_end + datetime.timedelta(days=7) < now:
+                    overrides_to_remove.add(zimbra_id)
+                    logger.info(f"🧹 Override orphelin supprimé : {zimbra_id} (expiré depuis > 7j)")
+            except Exception:
+                pass
             continue
             
         zimbra_event = events_payload_map[zimbra_id]
@@ -668,7 +678,7 @@ def fetch_latest_ics_from_mail(cours_mapping, events_payload_map, dry_run=False)
     Enregistre les dérogations si pertinentes.
     """
     if dry_run:
-        logger.info("🧪 [DRY RUN] Recherche de mails simulée.")
+        logger.info("🧪 [DRY RUN] Recherche de mails (lecture seule, aucune sauvegarde).")
         
     if not IMAP_SERVER or not IMAP_USER or not IMAP_PASS:
         logger.info("ℹ️ Identifiants IMAP non configurés. Ignorance de la recherche de mails.")
@@ -772,7 +782,6 @@ def find_matching_zimbra_event(mail_event, events_by_date_code, compiled_codes):
     """
     event_name = str(mail_event.get('SUMMARY', ''))
     event_desc = str(mail_event.get('DESCRIPTION', ''))
-    original_title = event_name.strip().upper()
     search_zone = (event_name + " " + event_desc).upper()
     
     matched_code = None
@@ -882,10 +891,8 @@ def process_mail_parts(msg, msg_uid, overrides, events_by_date_code, compiled_co
                             
                             changes = []
                             # Compare times
-                            time_changed = False
                             if z_start_dt and z_end_dt:
                                 if z_start_dt.astimezone(UTC_TZ) != start_dt.astimezone(UTC_TZ) or z_end_dt.astimezone(UTC_TZ) != end_dt.astimezone(UTC_TZ):
-                                    time_changed = True
                                     old_time = f"{z_start_dt.astimezone(PARIS_TZ).strftime('%d/%m %H:%M')} - {z_end_dt.astimezone(PARIS_TZ).strftime('%H:%M')}"
                                     new_time = f"{start_dt.astimezone(PARIS_TZ).strftime('%d/%m %H:%M')} - {end_dt.astimezone(PARIS_TZ).strftime('%H:%M')}"
                                     changes.append(f"**🕒 Horaire modifié :**\n~~{old_time}~~\n➔ **{new_time}**")
@@ -960,19 +967,29 @@ def log_missing_codes(missing_codes):
         logger.error(f"❌ Impossible d'écrire le log : {e}")
 
 
-def execute_batch(service, requests_list):
+def execute_batch(service, requests_list, payload_map=None):
     """Exécute une liste de requêtes Google par batch de 50."""
     if not requests_list:
         return
 
     def batch_callback(request_id, response, exception):
         if exception:
-            logger.warning(f"⚠️ Erreur Batch sur {request_id}: {exception}")
+            if "409" in str(exception) and payload_map and request_id in payload_map:
+                logger.info(f"🔄 Conflit 409 sur {request_id}. Tentative de résolution via UPDATE...")
+                try:
+                    body = payload_map[request_id]
+                    service.events().update(calendarId=CALENDAR_ID, eventId=request_id, body=body).execute()
+                    logger.info(f"✅ Conflit résolu pour {request_id}")
+                except Exception as e2:
+                    logger.error(f"❌ Échec résolution conflit pour {request_id} : {e2}")
+            else:
+                logger.warning(f"⚠️ Erreur Batch sur {request_id}: {exception}")
 
     batch = service.new_batch_http_request(callback=batch_callback)
     count = 0
-    for req in requests_list:
-        batch.add(req)
+    # requests_list contient des tuples (request_object, request_id)
+    for req, req_id in requests_list:
+        batch.add(req, request_id=req_id)
         count += 1
         if count >= 50:
             batch.execute()
@@ -1042,7 +1059,6 @@ def sync_to_google(events_payload_map, full_sync=False, dry_run=False):
         list_params['syncToken'] = sync_token
     else:
         list_params['singleEvents'] = True
-        list_params['privateExtendedProperty'] = 'createdBy=unicaen-sync-bot'
         list_params['timeZone'] = 'UTC'
         if not full_sync:
             now_str = datetime.datetime.now(UTC_TZ).isoformat().replace("+00:00", "Z")
@@ -1057,7 +1073,9 @@ def sync_to_google(events_payload_map, full_sync=False, dry_run=False):
 
             for item in result.get('items', []):
                 if item.get('status') == 'cancelled':
-                    google_events_map.pop(item['id'], None)
+                    # Do not pop it from google_events_map anymore. If it's in ICS, we must do an UPDATE (not an INSERT) to restore it.
+                    # If it's not in ICS, we'll try to DELETE it, which might 410 (Gone), but we catch that.
+                    google_events_map[item['id']] = item
                 elif 'id' in item:
                     # Ignore events not created by us if we pull everything (syncToken doesn't filter by extendedProperty!)
                     props = item.get('extendedProperties', {}).get('private', {})
@@ -1078,7 +1096,6 @@ def sync_to_google(events_payload_map, full_sync=False, dry_run=False):
             logger.warning("🔄 Sync token expiré. Re-synchronisation complète...")
             list_params.pop('syncToken', None)
             list_params['singleEvents'] = True
-            list_params['privateExtendedProperty'] = 'createdBy=unicaen-sync-bot'
             list_params['timeZone'] = 'UTC'
             if not full_sync:
                 now_str = datetime.datetime.now(UTC_TZ).isoformat().replace("+00:00", "Z")
@@ -1122,13 +1139,15 @@ def sync_to_google(events_payload_map, full_sync=False, dry_run=False):
         old_data = google_events_map[eid]
 
         needs_update = False
-        if normalize_str(new_data['summary']) != normalize_str(old_data.get('summary', '')):
+        if old_data.get('status') == 'cancelled':
+            needs_update = True
+        elif normalize_str(new_data['summary']) != normalize_str(old_data.get('summary', '')):
             needs_update = True
         elif normalize_str(new_data['description']) != normalize_str(old_data.get('description', '')):
             needs_update = True
         elif normalize_str(new_data['location']) != normalize_str(old_data.get('location', '')):
             needs_update = True
-        elif new_data.get('colorId') != old_data.get('colorId', ''):
+        elif str(new_data.get('colorId', '')) != str(old_data.get('colorId', '')):
             needs_update = True
         # Vérifier les changements d'horaire (start/end) — normaliser Z ↔ +00:00
         elif normalize_dt(new_data['start'].get('dateTime')) != normalize_dt(old_data.get('start', {}).get('dateTime', '')):
@@ -1149,19 +1168,26 @@ def sync_to_google(events_payload_map, full_sync=False, dry_run=False):
 
     # --- Exécution batch ---
     batch_requests = []
+    
+    # 1. Deletes
     for ev_id in to_delete:
-        batch_requests.append(service.events().delete(calendarId=CALENDAR_ID, eventId=ev_id))
+        if google_events_map.get(ev_id, {}).get('status') != 'cancelled':
+            batch_requests.append((service.events().delete(calendarId=CALENDAR_ID, eventId=ev_id), ev_id))
+            
+    # 2. Inserts
     for ev_id in to_insert:
         body = events_payload_map[ev_id]
-        batch_requests.append(service.events().insert(calendarId=CALENDAR_ID, body=body))
+        batch_requests.append((service.events().insert(calendarId=CALENDAR_ID, body=body), ev_id))
+        
+    # 3. Updates
     for ev_id in to_update:
         body = events_payload_map[ev_id]
-        batch_requests.append(service.events().update(calendarId=CALENDAR_ID, eventId=ev_id, body=body))
+        batch_requests.append((service.events().update(calendarId=CALENDAR_ID, eventId=ev_id, body=body), ev_id))
 
     if batch_requests:
         logger.info(f"🚀 Envoi de {len(batch_requests)} opérations...")
         if not dry_run:
-            execute_batch(service, batch_requests)
+            execute_batch(service, batch_requests, events_payload_map)
         else:
             logger.info("🧪 [DRY RUN] Opérations API Google ignorées.")
     else:
@@ -1203,6 +1229,10 @@ def main():
         test_discord_notifications()
         return
 
+    if args.full and args.mail:
+        logger.warning("⚠️ Les flags --full et --mail sont incompatibles. --full sera utilisé.")
+        args.mail = False
+
     if args.full:
         logger.info("🔁 Mode FULL : synchronisation de tous les événements (passés inclus)")
 
@@ -1221,8 +1251,7 @@ def main():
     # On le fait avant download_ics en mode --mail pour gagner du temps et de la bande passante si possible
     old_overrides_hash = hash(json.dumps(load_overrides(), sort_keys=True))
     
-    # On simule la structure vide pour fetch_latest_ics_from_mail si on n'a pas encore parsé l'ICS
-    dummy_events_payload_map = {}
+
     
     # Si on est en mode mail, on va d'abord télécharger l'ICS et voir si l'IMAP modifie les overrides
     ics_text = download_ics()
