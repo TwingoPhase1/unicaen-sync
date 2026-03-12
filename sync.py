@@ -61,6 +61,12 @@ IMAP_SERVER = os.getenv("IMAP_SERVER")
 IMAP_USER = os.getenv("IMAP_USER")
 IMAP_PASS = os.getenv("IMAP_PASS")
 
+# Liste blanche des expéditeurs autorisés à modifier l'emploi du temps (séparés par des virgules)
+_trusted_raw = os.getenv("TRUSTED_SENDERS", "")
+TRUSTED_SENDERS = set(
+    addr.strip().lower() for addr in _trusted_raw.split(",") if addr.strip()
+) if _trusted_raw.strip() else None  # None = pas de filtre (tout est accepté)
+
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 # Gestion Hack Ecampus
@@ -740,6 +746,16 @@ def fetch_latest_ics_from_mail(cours_mapping, events_payload_map, dry_run=False)
                         continue
                         
                     msg = email.message_from_bytes(raw_email)
+                    
+                    # --- Sécurité : vérification de l'expéditeur ---
+                    if TRUSTED_SENDERS is not None:
+                        sender = (msg.get('From', '') or '').lower()
+                        # Extraire l'adresse email pure (entre < > si présent)
+                        sender_match = re.search(r'<([^>]+)>', sender)
+                        sender_addr = sender_match.group(1) if sender_match else sender.strip()
+                        if sender_addr not in TRUSTED_SENDERS:
+                            logger.info(f"🛡️ Mail UID {msg_uid} ignoré : expéditeur non-autorisé ({sender_addr})")
+                            continue
                     
                     # Extract subject for cancellation detection
                     subject = ""
