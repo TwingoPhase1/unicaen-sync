@@ -1095,7 +1095,25 @@ def sync_to_google(events_payload_map, full_sync=False, dry_run=False):
     google_ids = set(google_events_map.keys())
 
     ids_to_maybe_delete = google_ids - ics_ids
-    to_delete = {x for x in ids_to_maybe_delete if should_delete(x, google_events_map)}
+    to_delete = set()
+    now_aware_diff = datetime.datetime.now(UTC_TZ)
+    
+    for x in ids_to_maybe_delete:
+        if should_delete(x, google_events_map):
+            if not full_sync:
+                end_str = google_events_map[x].get('end', {}).get('dateTime')
+                if end_str:
+                    try:
+                        end_dt = datetime.datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                        if end_dt <= now_aware_diff:
+                            # Événement passé en mode incrémental : on ne le supprime pas de Google
+                            # mais on le retire du cache local pour alléger
+                            local_store['events'].pop(x, None)
+                            continue
+                    except Exception:
+                        pass
+            to_delete.add(x)
+
     to_insert = ics_ids - google_ids
     to_update = set()
 
